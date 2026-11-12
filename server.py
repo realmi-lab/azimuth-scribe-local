@@ -451,6 +451,7 @@ def get_state(refresh: bool = False):
 
 
 class TextUpdate(BaseModel):
+    file_id: str | None = None
     transcript: str | None = Field(default=None, max_length=300000)
     summary: str | None = Field(default=None, max_length=300000)
 
@@ -460,8 +461,14 @@ def update_text(body: TextUpdate):
     with LOCK:
         if busy():
             raise HTTPException(409, "작업이 끝난 뒤 텍스트를 수정하세요.")
-        for key, value in body.model_dump(exclude_none=True).items():
-            STATE[key] = value
+        target = STATE
+        if body.file_id:
+            target = next((f for f in STATE["files"] if f["id"] == body.file_id), None)
+            if target is None:
+                raise HTTPException(404, "녹음을 찾을 수 없습니다.")
+        for key in ("transcript", "summary"):
+            if (value := getattr(body, key)) is not None:
+                target[key] = value
         persist()
     return {"ok": True}
 
@@ -575,11 +582,21 @@ def remove_files(body: FileSelection):
     return {"ok": True}
 
 
+class TranscriptionRequest(BaseModel):
+    ids: list[str] | None = None
+
+
 @app.post("/api/transcribe")
-def transcribe(file_id: str | None = None):
+def transcribe(file_id: str | None = None, body: TranscriptionRequest | None = None):
     with LOCK:
         require_idle()
-        selected = [f for f in STATE["files"] if (f["id"] == file_id if file_id else f["selected"])]
+        ids = set(body.ids) if body and body.ids is not None else None
+        if file_id:
+            selected = [f for f in STATE["files"] if f["id"] == file_id]
+        elif ids is not None:
+            selected = [f for f in STATE["files"] if f["id"] in ids]
+        else:
+            selected = [f for f in STATE["files"] if f["selected"]]
         if not selected:
             raise HTTPException(400, "변환할 파일을 선택하세요.")
         if not model_installed():
@@ -952,6 +969,7 @@ def prepare_models(body: PrepareRequest):
 
 
 class ExportRequest(BaseModel):
+    file_id: str | None = None
     kind: Literal["transcript", "summary"]
     format: Literal["txt", "md"] = "txt"
 
@@ -959,7 +977,12 @@ class ExportRequest(BaseModel):
 @app.post("/api/export")
 def export_result(body: ExportRequest):
     with LOCK:
-        text = STATE[body.kind]
+        target = STATE
+        if body.file_id:
+            target = next((f for f in STATE["files"] if f["id"] == body.file_id), None)
+            if target is None:
+                raise HTTPException(404, "녹음을 찾을 수 없습니다.")
+        text = target.get(body.kind, "")
     if not text.strip():
         raise HTTPException(400, "저장할 내용이 없습니다.")
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
@@ -979,7 +1002,7 @@ def storage_files(kind: Literal["recordings", "results"]):
 
 
 @app.get("/api/download/{kind}/{filename}")
-def download(kind: Literal["recordings", "results"], filename: str):
+def download(kind: Literal["recordings", "results"], filename: str, request: Request):
     folder = RECORDINGS if kind == "recordings" else RESULTS
     path = (folder / filename).resolve()
     if path.parent != folder or not VAULT.encrypted(path).is_file():
@@ -990,16 +1013,45 @@ def download(kind: Literal["recordings", "results"], filename: str):
     import mimetypes
     # The reader authenticates each block before releasing it; no plaintext temp file.
     source = VAULT.open(path)
+    total, start, end, status = source.size, 0, source.size - 1, 200
+    headers = {"Accept-Ranges": "bytes", "Content-Disposition": "attachment; filename*=UTF-8''" + quote(display, safe="")}
+    requested = request.headers.get("range", "")
+    # A single byte range supports WebKit's initial probe and audio seeking.
+    # Unsupported range units/multiple ranges fall back to the full representation.
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested)
+    if match:
+        first, last = match.groups()
+        try:
+            first = int(first) if first else None
+            last = int(last) if last else None
+        except ValueError:
+            source.close()
+            raise HTTPException(416, "요청한 재생 범위가 없습니다.", headers={"Content-Range": f"bytes */{total}"})
+        if first is not None:
+            start, end = first, min(last, total - 1) if last is not None else total - 1
+        elif last is not None and last > 0:
+            start = max(0, total - last)
+        else:
+            start = total
+        if start >= total or end < start:
+            source.close()
+            raise HTTPException(416, "요청한 재생 범위가 없습니다.", headers={"Content-Range": f"bytes */{total}"})
+        status = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    headers["Content-Length"] = str(max(0, end - start + 1))
+    source.seek(start)
     def content():
         try:
-            for part in iter(lambda: source.read(BLOCK), b""):
-                if not VAULT.unlocked:
+            remaining = max(0, end - start + 1)
+            while remaining and VAULT.unlocked:
+                part = source.read(min(BLOCK, remaining))
+                if not part or not VAULT.unlocked:
                     break
+                remaining -= len(part)
                 yield part
         finally:
             source.close()
-    return StreamingResponse(content(), media_type=mimetypes.guess_type(display)[0] or "application/octet-stream",
-                             headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(display, safe="")})
+    return StreamingResponse(content(), status_code=status, media_type=mimetypes.guess_type(display)[0] or "application/octet-stream", headers=headers)
 
 
 @app.get("/")

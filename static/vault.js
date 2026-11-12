@@ -24,14 +24,14 @@ window.ScribeVault = (() => {
     byId("vault-title").textContent = creating ? "암호화 보관함 만들기" : status.locking ? "작업을 마무리하고 잠그는 중…" : "보관함 잠금 해제";
     byId("vault-confirm-label").hidden = !creating;
     byId("vault-confirm").required = creating;
-    byId("vault-password").minLength = creating ? 12 : 1;
+    byId("vault-password").minLength = creating ? 8 : 1;
     byId("vault-password").autocomplete = creating ? "new-password" : "current-password";
     byId("vault-submit").textContent = creating ? "보관함 만들고 기존 파일 암호화" : "비밀번호로 열기";
     byId("vault-submit").disabled = status.locking;
     byId("vault-native").hidden = !native() || creating;
     byId("vault-remember-label").hidden = !native();
     byId("vault-note").textContent = creating
-      ? "Mac 로그인 암호와 별개의 비밀번호를 12자 이상 정하세요. 기존 파일은 암호화 복사본을 검증한 뒤 원본을 지웁니다. 비밀번호를 잊고 키체인도 사용할 수 없으면 복구할 수 없습니다."
+      ? "Mac 로그인 암호와 별개의 비밀번호를 8자 이상 정하세요. 기존 파일은 암호화 복사본을 검증한 뒤 원본을 지웁니다. 비밀번호를 잊고 키체인도 사용할 수 없으면 복구할 수 없습니다."
       : "비밀번호 또는 Mac 앱의 본인 인증으로 보관함을 여세요. 녹음 중 임시 파일은 암호화 대상에서 제외됩니다.";
   }
   async function sync() {

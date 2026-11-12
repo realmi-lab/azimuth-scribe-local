@@ -74,3 +74,5 @@ PyAV가 사용하는 FFmpeg 라이브러리는 [공식 binary wheel](https://pya
 녹음·텍스트·설정·모델·로그·Python 가상환경은 Git에 올리지 않습니다. 백업은 `~/Library/Application Support/Azimuth Scribe Local/data/`를 복사합니다. 모델과 의존성의 라이선스는 [Third-party notices](../THIRD_PARTY_NOTICES.md)를 확인하세요.
 
 1.1.0부터 보관함 비밀번호 설정 후 녹음·텍스트를 암호화합니다. `vault.json`과 `.enc` 파일을 함께 백업하고 비밀번호를 따로 보관하세요. [암호화와 기존 데이터 이관](security.md)을 확인하세요. 기존 모델 준비 명령은 잠긴 상태에서도 사용할 수 있습니다.
+
+1.2.0부터 새 보관함 비밀번호의 최소 길이는 8자입니다. 기존 보관함의 비밀번호와 저장 데이터는 유지됩니다. 기록 화면은 사이드바와 녹음별 카드로 구성하며, 각 녹음의 원문·요약 편집과 암호화 음성 재생을 지원합니다.

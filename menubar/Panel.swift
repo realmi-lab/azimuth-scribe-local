@@ -34,7 +34,7 @@ final class PanelModel: ObservableObject {
 
 /// Single large panel: native recorder bar on top, embedded web workspace below.
 struct RecorderPanel: View {
-    static let size = NSSize(width: 880, height: 700)
+    static let size = NSSize(width: 1000, height: 760)
     @ObservedObject var model: PanelModel
     let workspace: Workspace
     private var locked: Bool { model.busy || model.working || model.recording || !model.connected }
@@ -43,7 +43,7 @@ struct RecorderPanel: View {
         model.recording ? "녹음 중" : model.working ? "작업 중" : model.connected ? (model.vaultLocked ? "보관함 잠김" : "준비됨") : "서버 중지됨"
     }
     private var statusColor: Color {
-        model.recording ? .red : model.working ? .orange : model.connected ? .green : .secondary
+        model.recording ? .red : model.working ? .blue : .secondary
     }
 
     var body: some View {
@@ -59,7 +59,6 @@ struct RecorderPanel: View {
             }
             if model.connected {
                 WorkspacePane(workspace: workspace, page: model.screen == .settings ? "settings" : "workspace")
-                    .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 10)
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "power.circle").font(.system(size: 40)).foregroundStyle(.secondary)
@@ -70,7 +69,7 @@ struct RecorderPanel: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .background(Color(nsColor: .textBackgroundColor).ignoresSafeArea()) // clean solid white / dark
-        .frame(minWidth: 720, idealWidth: Self.size.width, maxWidth: .infinity,
+        .frame(minWidth: 780, idealWidth: Self.size.width, maxWidth: .infinity,
                minHeight: 520, idealHeight: Self.size.height, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("scribe-panel")
     }

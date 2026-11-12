@@ -145,8 +145,8 @@ class Vault:
             raise VaultError("기존 암호화 파일의 vault.json이 없습니다. 보관함 전체 백업을 복원하세요.")
         if any(path.exists() and next(path.glob("*.enc"), None) for path in (self.folder / "Recordings", self.folder / "Results")):
             raise VaultError("기존 암호화 파일의 vault.json이 없습니다. 보관함 전체 백업을 복원하세요.")
-        if not 12 <= len(password) <= 256 or not password.strip() or len(password.encode("utf-8")) > 1024:
-            raise VaultError("보관함 비밀번호는 12~256자로 입력하세요.")
+        if not 8 <= len(password) <= 256 or not password.strip() or len(password.encode("utf-8")) > 1024:
+            raise VaultError("보관함 비밀번호는 8~256자로 입력하세요.")
         key, salt, nonce, identity = secrets.token_bytes(32), secrets.token_bytes(16), secrets.token_bytes(12), uuid.uuid4().hex
         wrapped = AESGCM(self._derive(password, salt)).encrypt(nonce, key, identity.encode())
         meta = {"version": 1, "id": identity, "salt": salt.hex(), "nonce": nonce.hex(), "wrapped_key": wrapped.hex()}

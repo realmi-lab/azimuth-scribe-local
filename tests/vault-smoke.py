@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 import wave
 
@@ -14,7 +15,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vault import Vault, VaultError, BLOCK, HEADER, IDLE_SECONDS
 
-PASSWORD = "test-only-long-vault-passphrase"
+PASSWORD = "test1234"  # Exactly eight characters; disposable test vaults only.
 SECRET = "개인 회의 기록: 금요일 오전 열 시에 제품 발표"
 
 
@@ -29,6 +30,18 @@ def wave_data():
 
 
 class FileContracts(unittest.TestCase):
+    def test_eight_character_password_minimum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Vault(Path(directory))
+            for password in ("seven77", "        "):
+                with self.assertRaisesRegex(VaultError, "8~256"):
+                    vault.setup(password)
+                self.assertFalse(vault.meta_path.exists())
+            vault.setup(PASSWORD)
+            vault.lock()
+            vault.unlock(PASSWORD)
+            self.assertTrue(vault.unlocked)
+
     def test_seek_authentication_and_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -136,7 +149,7 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
             async with s.app.router.lifespan_context(s.app), httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:18765", headers=headers) as client:
                 async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:18765", headers=headers) as anonymous:
                     self.assertEqual((await client.get("/api/state")).status_code, 423)
-                    self.assertEqual((await client.post("/api/vault/setup", json={"password": "short"})).status_code, 400)
+                    self.assertEqual((await client.post("/api/vault/setup", json={"password": "seven77"})).status_code, 400)
                     setup = await client.post("/api/vault/setup", json={"password": PASSWORD})
                     self.assertEqual(setup.status_code, 200, setup.text)
                     self.assertIn("HttpOnly", setup.headers["set-cookie"])
@@ -151,6 +164,23 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                     state = (await client.get("/api/state")).json()
                     self.assertEqual(state["transcript"], SECRET)
                     self.assertEqual((await client.get("/api/download/recordings/legacy.wav")).content, audio)
+                    ranged = await client.get("/api/download/recordings/legacy.wav", headers={"Range": "bytes=0-1"})
+                    self.assertEqual(ranged.status_code, 206)
+                    self.assertEqual(ranged.content, audio[:2])
+                    self.assertEqual(ranged.headers["content-range"], f"bytes 0-1/{len(audio)}")
+                    self.assertEqual((await client.get("/api/download/recordings/legacy.wav", headers={"Range": "bytes=-8"})).content, audio[-8:])
+                    unavailable = await client.get("/api/download/recordings/legacy.wav", headers={"Range": f"bytes={len(audio)}-"})
+                    self.assertEqual(unavailable.status_code, 416)
+                    self.assertEqual(unavailable.headers["content-range"], f"bytes */{len(audio)}")
+                    self.assertEqual((await anonymous.get("/api/download/recordings/legacy.wav", headers={"Range": "bytes=0-1"})).status_code, 401)
+                    # Card editing and export must address one recording, preserving the global memo.
+                    self.assertEqual((await client.patch("/api/text", json={"file_id": "legacy", "transcript": "수정한 녹음 원문", "summary": "이 녹음의 요약"})).status_code, 200)
+                    scoped = (await client.get("/api/state")).json()
+                    self.assertEqual(scoped["transcript"], SECRET)
+                    self.assertEqual(scoped["files"][0]["transcript"], "수정한 녹음 원문")
+                    specific = (await client.post("/api/export", json={"file_id": "legacy", "kind": "summary", "format": "md"})).json()
+                    self.assertEqual((await client.get(specific["url"])).text, "이 녹음의 요약")
+                    self.assertEqual((await client.patch("/api/text", json={"file_id": "missing", "transcript": "수정"})).status_code, 404)
                     # PyAV/faster-whisper consume the seekable encrypted reader directly.
                     from faster_whisper.audio import decode_audio
                     with s.VAULT.open(root / "Recordings/legacy.wav") as reader:
@@ -162,6 +192,23 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                     saved = root / "Recordings" / added.json()["files"][0]["stored_name"]
                     self.assertFalse(saved.exists())
                     self.assertTrue(s.VAULT.encrypted(saved).exists())
+                    # A filtered batch explicitly addresses visible IDs, ignoring other selections.
+                    original_installed, original_whisper = s.model_installed, s.ensure_whisper
+                    s.model_installed = lambda: True
+                    s.ensure_whisper = lambda: SimpleNamespace(transcribe=lambda *_a, **_kw:
+                        ([SimpleNamespace(text="범위 확인 결과", end=1)], SimpleNamespace(duration=1)))
+                    try:
+                        self.assertEqual((await client.post("/api/transcribe", json={"ids": []})).status_code, 400)
+                        self.assertEqual((await client.post("/api/transcribe", json={"ids": ["legacy"]})).status_code, 200)
+                        for _ in range(50):
+                            if not s.busy():
+                                break
+                            await asyncio.sleep(0.02)
+                        scoped = (await client.get("/api/state")).json()
+                        self.assertEqual(scoped["files"][0]["transcript"], "범위 확인 결과")
+                        self.assertEqual(scoped["files"][1]["status"], "Pending")
+                    finally:
+                        s.model_installed, s.ensure_whisper = original_installed, original_whisper
                     self.assertEqual((await client.patch("/api/text", json={"summary": SECRET})).status_code, 200)
                     exported = (await client.post("/api/export", json={"kind": "summary", "format": "md"})).json()
                     self.assertTrue((root / "Results" / (exported["filename"] + ".enc")).exists())
