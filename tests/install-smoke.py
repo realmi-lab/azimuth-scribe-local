@@ -45,7 +45,7 @@ def main():
         with patch.object(Path, "home", return_value=home):
             runpy.run_path(str(source / "menubar" / "build.py"), run_name="__install_check__")
         runtime = home / "Library" / "Application Support" / "Azimuth Scribe Local"
-        app = home / "Applications" / "Azimuth Scribe.app"
+        app = home / "Applications" / "Local LLM Encoder.app"
         info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
         assert info["ScribeProjectPath"] == str(runtime)
         assert not (source / "data").exists() and not (source / ".venv").exists()

@@ -1,4 +1,6 @@
 import AppKit
+import SwiftUI
+import AVFoundation
 import Foundation
 
 struct Health: Decodable { let app: String; let root: String }
@@ -12,6 +14,7 @@ struct AppState: Decodable {
         let stt: STT
         let ollama: Ollama
     }
+    let files: [Clip]
     let settings: Settings
     let runtime: Runtime
 }
@@ -26,9 +29,12 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var operation: String?
     private var lastError: String?
     private var quitting = false
-    private var controlWindow: NSWindow?
-    private let statusLabel = NSTextField(labelWithString: "상태 확인 중…")
-    private let detailLabel = NSTextField(wrappingLabelWithString: "")
+    private var window: NSPanel!
+    private let panel = PanelModel()
+    private lazy var workspace = Workspace(base: base)
+    private var recorder: AVAudioRecorder?
+    private var meterTimer: Timer?
+    private var pending: URL { root.appendingPathComponent("data/pending-recording.m4a") }
     private let root: URL
     private let base: URL
     private let session: URLSession
@@ -62,13 +68,22 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.setActivationPolicy(.regular)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "mic.circle", accessibilityDescription: "Azimuth Scribe")
+            button.image = NSImage(systemSymbolName: "mic.circle", accessibilityDescription: "Local LLM Encoder")
             button.image?.isTemplate = true
             button.image?.size = NSSize(width: 20, height: 20)
-            button.setAccessibilityLabel("Azimuth Scribe")
+            button.setAccessibilityLabel("Local LLM Encoder")
         }
-        let menu = makeMenu()
-        statusItem.menu = menu
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePanel)
+        statusItem.button?.imagePosition = .imageLeading
+        panel.pending = FileManager.default.fileExists(atPath: pending.path)
+        panel.record = { [weak self] in self?.recordAction() }
+        panel.start = { [weak self] in self?.startServer(nil) }
+        panel.restart = { [weak self] in self?.restartServer(nil) }
+        panel.cancel = { [weak self] in self?.cancelWork(nil) }
+        panel.openFolder = { [weak self] path in self?.openFolder(path) }
+        panel.quit = { [weak self] in self?.quitEverything(nil) }
+        window = makeWindow()
         let mainMenu = NSMenu()
         let appMenu = NSMenuItem()
         appMenu.submenu = makeMenu()
@@ -76,11 +91,10 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.mainMenu = mainMenu
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
         refresh()
-        showControlWindow()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showControlWindow()
+        showPanel()
         return false
     }
 
@@ -89,6 +103,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if panel.recording || panel.busy { return .terminateCancel }
         if quitting { return .terminateNow }
         if operation != nil || working {
             showError("현재 작업을 먼저 중단해 주세요.")
@@ -99,7 +114,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func makeMenu(retain: Bool = true) -> NSMenu {
-        let menu = NSMenu(title: "Azimuth Scribe")
+        let menu = NSMenu(title: "Local LLM Encoder")
         menu.autoenablesItems = false
         menu.delegate = self
         func item(_ title: String, _ selector: Selector?, tag: Int, key: String = "") {
@@ -108,21 +123,25 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.tag = tag
             menu.addItem(entry)
         }
-        item("Azimuth Scribe", nil, tag: 1)
         item("상태 확인 중…", nil, tag: 2)
         item("", nil, tag: 3)
         menu.addItem(.separator())
-        item("프로그램 열기…", #selector(openProgram(_:)), tag: 10, key: "o")
-        item("환경설정…", #selector(openSettings(_:)), tag: 11, key: ",")
+        item("패널 열기", #selector(openProgram(_:)), tag: 10, key: "o")
+        item("설정…", #selector(openSettings(_:)), tag: 11, key: ",")
         menu.addItem(.separator())
-        item("서버 시작", #selector(startServer(_:)), tag: 20)
-        item("서버 중지", #selector(stopServer(_:)), tag: 21)
+        item("서버 시작", #selector(toggleServer(_:)), tag: 20)
         item("서버 다시 시작", #selector(restartServer(_:)), tag: 22)
         item("현재 작업 중단", #selector(cancelWork(_:)), tag: 23)
         menu.addItem(.separator())
-        item("녹음 폴더 열기", #selector(openRecordings(_:)), tag: 30)
-        item("저장 결과 폴더 열기", #selector(openResults(_:)), tag: 31)
-        item("서버 로그 보기", #selector(openLog(_:)), tag: 32)
+        let folders = NSMenu()
+        for (title, selector) in [("녹음 폴더", #selector(openRecordings(_:))), ("저장 결과 폴더", #selector(openResults(_:))), ("서버 로그", #selector(openLog(_:)))] {
+            let entry = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+            entry.target = self
+            folders.addItem(entry)
+        }
+        let folderItem = NSMenuItem(title: "폴더 열기", action: nil, keyEquivalent: "")
+        folderItem.submenu = folders
+        menu.addItem(folderItem)
         menu.addItem(.separator())
         item("컨트롤러만 종료 (서버 유지)", #selector(quitController(_:)), tag: 40)
         item("모두 종료", #selector(quitEverything(_:)), tag: 41, key: "q")
@@ -139,7 +158,6 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func update(_ menu: NSMenu) {
         for entry in menu.items where !entry.isSeparatorItem {
             switch entry.tag {
-            case 1: entry.isEnabled = false
             case 2:
                 entry.title = operation ?? (connected ? (working ? "● 작업 중 · localhost:\(base.port!)" : "● 실행 중 · localhost:\(base.port!)") : "○ 서버 중지됨")
                 entry.isEnabled = false
@@ -147,11 +165,13 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 entry.title = connected ? (working ? state?.runtime.job?.message ?? "" : "Whisper \(state?.settings.whisper_model ?? "—") · \(state?.settings.llm_model ?? "—")") : lastError ?? "서버 시작 메뉴로 실행하세요."
                 entry.isHidden = entry.title.isEmpty
                 entry.isEnabled = false
-            case 10, 11: entry.isEnabled = operation == nil
-            case 20: entry.isEnabled = operation == nil && !connected
-            case 21, 22: entry.isEnabled = operation == nil && connected && !working
+            case 10: entry.isEnabled = operation == nil
+            case 11: entry.isEnabled = operation == nil && connected
+            case 20:
+                entry.title = connected ? "서버 중지" : "서버 시작"
+                entry.isEnabled = operation == nil && (!connected || !working)
+            case 22: entry.isEnabled = operation == nil && connected && !working
             case 23: entry.isEnabled = operation == nil && working && state?.runtime.job?.status != "stopping"
-            case 30, 31, 32: entry.isEnabled = true
             case 40: entry.isEnabled = operation == nil
             case 41: entry.isEnabled = operation == nil && !working
             default: break
@@ -160,64 +180,166 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateMenus() {
+        panel.connected = connected
+        panel.working = working
+        panel.job = state?.runtime.job?.message ?? ""
+        panel.failed = state?.runtime.job?.status == "error"
         for menu in menus { update(menu) }
-        statusItem?.button?.toolTip = operation ?? (connected ? "Azimuth Scribe · 실행 중" : "Azimuth Scribe · 서버 중지됨")
-        statusItem?.button?.image = NSImage(systemSymbolName: connected ? "mic.circle.fill" : "mic.circle", accessibilityDescription: "Azimuth Scribe")
+        statusItem?.button?.toolTip = operation ?? (connected ? "Local LLM Encoder · 실행 중" : "Local LLM Encoder · 서버 중지됨")
+        statusItem?.button?.image = NSImage(systemSymbolName: connected ? "mic.circle.fill" : "mic.circle", accessibilityDescription: "Local LLM Encoder")
         statusItem?.button?.image?.isTemplate = true
         statusItem?.button?.image?.size = NSSize(width: 20, height: 20)
-        statusLabel.stringValue = operation ?? (connected ? "실행 중 · localhost:\(base.port!)" : "서버 중지됨")
-        detailLabel.stringValue = connected ? (working ? state?.runtime.job?.message ?? "" : "Whisper \(state?.settings.whisper_model ?? "—") · \(state?.settings.llm_model ?? "—")") : lastError ?? "메뉴에서 서버를 시작할 수 있습니다."
     }
 
-    private func showControlWindow() {
-        if controlWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300),
-                                  styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-            window.title = "Azimuth Scribe"
-            window.isReleasedWhenClosed = false
-            let stack = NSStackView()
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 17
-            stack.translatesAutoresizingMaskIntoConstraints = false
-            let heading = NSTextField(labelWithString: "Azimuth Scribe")
-            heading.font = .systemFont(ofSize: 26, weight: .semibold)
-            statusLabel.font = .systemFont(ofSize: 14, weight: .medium)
-            detailLabel.font = .systemFont(ofSize: 12)
-            detailLabel.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(heading)
-            stack.addArrangedSubview(statusLabel)
-            stack.addArrangedSubview(detailLabel)
-            let buttons = NSStackView()
-            buttons.spacing = 9
-            for (title, action) in [("프로그램 열기", #selector(openProgram(_:))),
-                                    ("환경설정", #selector(openSettings(_:)))] {
-                let button = NSButton(title: title, target: self, action: action)
-                button.bezelStyle = .rounded
-                buttons.addArrangedSubview(button)
-            }
-            stack.addArrangedSubview(buttons)
-            let hint = NSTextField(wrappingLabelWithString: "상단 마이크 아이콘이나 Dock 아이콘의 우클릭 메뉴에서 서버를 제어하세요. 창을 닫아도 메뉴 막대에서 계속 실행됩니다.")
-            hint.font = .systemFont(ofSize: 11)
-            hint.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(hint)
-            window.contentView!.addSubview(stack)
-            NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 28),
-                stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -28),
-                stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 25),
-            ])
-            window.center()
-            controlWindow = window
-        }
-        controlWindow?.makeKeyAndOrderFront(nil)
+    /// Fixed-size panel window (a popover jumps sideways when it is this wide near the screen edge).
+    private func makeWindow() -> NSPanel {
+        let host = NSHostingController(rootView: RecorderPanel(model: panel, workspace: workspace))
+        host.sizingOptions = [.minSize]
+        let window = NSPanel(contentRect: NSRect(origin: .zero, size: RecorderPanel.size),
+                             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                             backing: .buffered, defer: false)
+        window.contentViewController = host
+        window.setContentSize(RecorderPanel.size)
+        window.title = "Local LLM Encoder"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        // An empty unified toolbar gives the 52pt title bar of modern Mac apps,
+        // so the panel's own controls sit on the same line as the traffic lights.
+        window.toolbar = NSToolbar(identifier: "scribe")
+        window.toolbarStyle = .unified
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = false
+        window.isFloatingPanel = false
+        window.hidesOnDeactivate = false
+        window.becomesKeyOnlyIfNeeded = false
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        return window
+    }
+
+    @objc private func togglePanel() {
+        if window.isVisible && window.isKeyWindow { window.orderOut(nil) } else { showPanel() }
+    }
+
+    private func showPanel() {
+        if !window.isVisible { positionWindow() }
         NSApp.activate(ignoringOtherApps: true)
-        updateMenus()
+        window.makeKeyAndOrderFront(nil)
+        refresh()
+    }
+
+    /// Drop the panel just below the menu-bar icon, kept inside that screen; centre it when the icon is not on screen.
+    private func positionWindow() {
+        if let button = statusItem.button, let barWindow = button.window, let screen = barWindow.screen {
+            let icon = barWindow.convertToScreen(button.convert(button.bounds, to: nil))
+            let visible = screen.visibleFrame
+            if screen.frame.intersects(icon) && icon.midX > screen.frame.minX {
+                let width = min(window.frame.width, visible.width - 16)
+                let height = min(window.frame.height, visible.height - 14)
+                let x = min(max(icon.midX - width / 2, visible.minX + 8), visible.maxX - width - 8)
+                window.setFrame(NSRect(x: x, y: visible.maxY - height - 6, width: width, height: height), display: false)
+                return
+            }
+        }
+        window.center()
+    }
+
+    private func submit(_ path: String, _ body: [String: Any]) {
+        guard !panel.busy, !working else { return }
+        panel.busy = true
+        panel.notice = ""
+        request(path, body: body) { [weak self] _, error in
+            guard let self else { return }
+            self.panel.notice = error?.localizedDescription ?? ""
+            self.panel.busy = false
+            self.refresh()
+        }
+    }
+
+    private func recordAction() {
+        if let recorder {
+            recorder.stop()
+            self.recorder = nil
+            meterTimer?.invalidate()
+            statusItem.button?.title = ""
+            panel.recording = false
+            panel.pending = true
+            uploadRecording()
+            return
+        }
+        guard !panel.busy, connected, !working else { return }
+        if panel.pending { uploadRecording(); return }
+        panel.busy = true
+        AVCaptureDevice.requestAccess(for: .audio) { granted in DispatchQueue.main.async {
+            self.panel.busy = false
+            guard granted else {
+                self.panel.notice = "시스템 설정 → 개인정보 보호 및 보안 → 마이크에서 접근을 허용하세요."
+                return
+            }
+            do {
+                let recorder = try AVAudioRecorder(url: self.pending, settings: [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44100, AVNumberOfChannelsKey: 1])
+                recorder.isMeteringEnabled = true
+                guard recorder.record() else { throw NSError(domain: "Scribe", code: 2, userInfo: [NSLocalizedDescriptionKey:"마이크를 시작할 수 없습니다."]) }
+                self.recorder = recorder
+                self.panel.seconds = 0
+                self.panel.notice = ""
+                self.panel.recording = true
+                self.meterTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+                    recorder.updateMeters()
+                    self.panel.level = max(0, min(1, (Double(recorder.averagePower(forChannel: 0)) + 60) / 60))
+                    self.panel.seconds = Int(recorder.currentTime)
+                    self.statusItem.button?.title = " " + self.panel.elapsed
+                }
+            } catch { self.panel.notice = error.localizedDescription }
+        } }
+    }
+
+    /// Multipart upload through curl; returns the clips the server created.
+    private func postFiles(_ parts: [String], recording: Bool) throws -> [Clip] {
+        let proc = Process(), pipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        proc.arguments = ["--noproxy", "*", "-fsS", "-H", "X-Scribe-Request: 1"]
+            + parts.flatMap { ["-F", "files=@" + $0] }
+            + (recording ? ["-F", "recording=true"] : [])
+            + [base.appendingPathComponent("api/files").absoluteString]
+        proc.standardOutput = pipe
+        try proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return [] }
+        return (try? JSONDecoder().decode(Upload.self, from: data).files) ?? []
+    }
+
+    private func uploadRecording() {
+        panel.busy = true
+        panel.notice = "녹음 저장 중…"
+        let file = pending
+        DispatchQueue.global().async {
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            do {
+                guard let clip = try self.postFiles([file.path + ";filename=" + stamp + ".m4a"], recording: true).first else {
+                    throw NSError(domain:"Scribe", code:3, userInfo:[NSLocalizedDescriptionKey:"녹음을 보관했습니다. 다시 저장해 주세요."])
+                }
+                try FileManager.default.removeItem(at: file)
+                DispatchQueue.main.async {
+                    self.panel.busy = false
+                    self.panel.pending = false
+                    self.panel.notice = ""
+                    self.submit("api/transcribe?file_id=" + clip.id, [:])
+                    self.refresh()
+                }
+            } catch { DispatchQueue.main.async {
+                self.panel.busy = false
+                self.panel.notice = error.localizedDescription
+            } }
+        }
     }
 
     private func request(_ path: String, body: [String: Any]? = nil, completion: @escaping (Data?, Error?) -> Void) {
-        var request = URLRequest(url: base.appendingPathComponent(path))
+        var request = URLRequest(url: URL(string: "/" + path, relativeTo: base)!.absoluteURL)
         if let body = body {
+            request.timeoutInterval = 30
             request.httpMethod = "POST"
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -226,7 +348,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         session.dataTask(with: request) { data, response, error in
             let ok = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
             DispatchQueue.main.async {
-                completion(ok ? data : nil, error ?? (ok ? nil : NSError(domain: "Scribe", code: 1, userInfo: [NSLocalizedDescriptionKey: "로컬 서버 응답을 확인할 수 없습니다."])))
+                completion(ok ? data : nil, error ?? (ok ? nil : NSError(domain: "Scribe", code: 1, userInfo: [NSLocalizedDescriptionKey: (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["detail"] as? String) ?? "로컬 서버 응답을 확인할 수 없습니다."])))
             }
         }.resume()
     }
@@ -307,32 +429,29 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func stopServer(_ sender: Any?) {
-        guard !working else { return }
+        guard !working && !panel.recording && !panel.busy else { return }
         runLauncher(["--stop"], title: "서버 중지 중…")
     }
 
     @objc private func restartServer(_ sender: Any?) {
-        guard !working else { return }
+        guard !working && !panel.recording && !panel.busy else { return }
         runLauncher(["--stop"], title: "서버 다시 시작 중…") { [weak self] in
             self?.runLauncher([], title: "서버 시작 중…")
         }
     }
 
-    private func openPage(fragment: String = "") {
-        var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
-        components.host = "localhost"
-        components.fragment = fragment.isEmpty ? nil : fragment
-        if let url = components.url { NSWorkspace.shared.open(url) }
+    @objc private func toggleServer(_ sender: Any?) {
+        if connected { stopServer(sender) } else { startServer(sender) }
     }
 
     @objc private func openProgram(_ sender: Any?) {
-        if connected { openPage() }
-        else { runLauncher([], title: "서버 시작 중…") { [weak self] in self?.openPage() } }
+        panel.screen = .workspace
+        showPanel()
     }
 
     @objc private func openSettings(_ sender: Any?) {
-        if connected { openPage(fragment: "settings") }
-        else { runLauncher([], title: "서버 시작 중…") { [weak self] in self?.openPage(fragment: "settings") } }
+        panel.screen = .settings
+        showPanel()
     }
 
     @objc private func cancelWork(_ sender: Any?) {
@@ -360,12 +479,13 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func quitController(_ sender: Any?) {
+        guard !panel.recording && !panel.busy else { return }
         quitting = true
         NSApp.terminate(nil)
     }
 
     @objc private func quitEverything(_ sender: Any?) {
-        guard operation == nil && !working else { return }
+        guard operation == nil && !working && !panel.recording && !panel.busy else { return }
         runLauncher(["--stop"], title: "종료 중…") { [weak self] in
             self?.quitting = true
             NSApp.terminate(nil)
@@ -374,7 +494,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "Azimuth Scribe"
+        alert.messageText = "Local LLM Encoder"
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.addButton(withTitle: "확인")

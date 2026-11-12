@@ -8,7 +8,7 @@
 zsh setup.command
 ```
 
-macOS 14 이상 Apple Silicon Mac과 Apple Command Line Tools가 필요합니다. 도구가 없다면 먼저 `xcode-select --install`로 설치를 마칩니다. 설치기는 Python 환경, 아래 의존성과 기본 모델을 준비한 뒤 `http://localhost:18765` 서버를 실행합니다. 메뉴 앱은 `~/Applications/Azimuth Scribe.app`에 설치합니다. 모델 파일은 각 공식 배포처에서 받으며 Git 저장소에는 포함하지 않습니다.
+macOS 14 이상 Apple Silicon Mac과 Apple Command Line Tools가 필요합니다. 도구가 없다면 먼저 `xcode-select --install`로 설치를 마칩니다. 설치기는 Python 환경, 아래 의존성과 기본 모델을 준비한 뒤 `http://localhost:18765` 서버를 실행합니다. 메뉴 앱은 `~/Applications/Local LLM Encoder.app`에 설치합니다. 모델 파일은 각 공식 배포처에서 받으며 Git 저장소에는 포함하지 않습니다.
 
 ## 기본 모델
 

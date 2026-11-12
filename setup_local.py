@@ -24,7 +24,7 @@ def main():
     ensure_ollama(runtime)
     print("3/3 Whisper · Qwen 다운로드… 최초 준비에는 시간이 걸립니다.", flush=True)
     subprocess.run([str(python), str(runtime / "launcher.py"), "--download-models"], check=True)
-    print("설치 완료. ~/Applications/Azimuth Scribe.app 을 열어 주세요.", flush=True)
+    print("설치 완료. ~/Applications/Local LLM Encoder.app 을 열어 주세요.", flush=True)
     print("프로그램: http://localhost:18765 · 종료: stop.command", flush=True)
 
 

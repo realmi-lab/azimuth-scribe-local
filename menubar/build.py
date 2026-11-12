@@ -9,8 +9,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = Path.home() / "Library" / "Application Support" / "Azimuth Scribe Local"
-DEST = Path.home() / "Applications" / "Azimuth Scribe.app"
-BUILD = ROOT / "build" / "Azimuth Scribe.app"
+DEST = Path.home() / "Applications" / "Local LLM Encoder.app"
+BUILD = ROOT / "build" / "Local LLM Encoder.app"
 CONTENTS = BUILD / "Contents"
 MACOS = CONTENTS / "MacOS"
 RESOURCES = CONTENTS / "Resources"
@@ -41,18 +41,19 @@ receipt = {"source_path": str(ROOT), "runtime_path": str(RUNTIME)}
 receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
 
 info = {
-    "CFBundleName": "Azimuth Scribe", "CFBundleDisplayName": "Azimuth Scribe",
+    "CFBundleName": "Local LLM Encoder", "CFBundleDisplayName": "Local LLM Encoder",
     "CFBundleIdentifier": "net.realmi.azimuth-scribe.local",
     "CFBundleExecutable": "AzimuthScribe", "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": "1.0.0", "CFBundleVersion": "1",
     "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True,
+    "NSMicrophoneUsageDescription": "메뉴 막대에서 시작한 녹음을 받아쓰려면 마이크 접근이 필요합니다.",
     "NSPrincipalClass": "NSApplication", "LSMultipleInstancesProhibited": True,
     "CFBundleIconFile": "AppIcon", "ScribeProjectPath": str(RUNTIME),
     "ScribePort": int(os.environ.get("SCRIBE_PORT", "18765")),
 }
 (CONTENTS / "Info.plist").write_bytes(plistlib.dumps(info))
 subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-O", "-framework", "AppKit",
-                "-target", "arm64-apple-macos14.0", str(ROOT / "menubar" / "main.swift"),
+                "-target", "arm64-apple-macos14.0", str(ROOT / "menubar" / "main.swift"), str(ROOT / "menubar" / "Panel.swift"), str(ROOT / "menubar" / "Workspace.swift"),
                 "-o", str(MACOS / "AzimuthScribe")], check=True)
 subprocess.run(["xcrun", "swift", str(ROOT / "menubar" / "icon.swift"), str(RESOURCES / "AppIcon.icns")], check=True)
 subprocess.run(["codesign", "--force", "--sign", "-", str(BUILD)], check=True)

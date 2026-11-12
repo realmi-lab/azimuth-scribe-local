@@ -97,8 +97,7 @@ def main():
                 assert container.streams.audio[0].codec_context.sample_rate == 16000
                 assert container.streams.audio[0].codec_context.layout.nb_channels == 1
             assert first["duration"] > 0 and first["name"].endswith(".wav")
-            request("PATCH", "/api/files/selection", json={"ids": [second["id"]], "selected": False})
-            request("POST", "/api/transcribe")
+            request("POST", f"/api/transcribe?file_id={first['id']}")
             state = wait_job()
             assert state["runtime"]["job"]["status"] == "completed", state["runtime"]["job"]
             assert state["files"][0]["status"] == "Completed" and state["files"][1]["status"] == "Pending", state["files"]
@@ -124,6 +123,12 @@ def main():
             summary = state["summary"]
             assert len(summary) > 40 and "시연" in summary, summary
             assert "<think>" not in summary and not summary.lstrip().startswith(("Okay", "Let me", "We need")), summary
+            request("POST", "/api/summary", json={"prompt": "회의록", "file_id": first["id"]})
+            clip_state = wait_job()
+            assert clip_state["runtime"]["job"]["status"] == "completed"
+            assert len(clip_state["files"][0]["summary"]) > 40
+            assert clip_state["summary"] == summary and not clip_state["files"][1].get("summary")
+            print("PASS: per-recording transcription and meeting minutes", flush=True)
             for fmt in ("txt", "md"):
                 output = request("POST", "/api/export", json={"kind": "summary", "format": fmt})
                 assert client.get(output["url"]).text == summary
