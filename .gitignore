@@ -1,0 +1,14 @@
+.venv/
+.bootstrap/
+.vendor/
+build/
+dist/
+outputs/
+.local-install.json
+data/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+*.log
