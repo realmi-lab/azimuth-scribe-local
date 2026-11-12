@@ -54,7 +54,6 @@
       <button class="nav-item active" id="nav-history" aria-current="page"><span class="nav-symbol purple"><svg class="icon"><use href="#i-history"/></svg></span><span>기록</span><span class="nav-count" id="history-count">0</span></button>
       <button class="nav-item" id="nav-notes"><span class="nav-symbol blue"><svg class="icon"><use href="#i-edit"/></svg></span><span>전체 메모</span></button>
       <button class="nav-item" data-action="prompts"><span class="nav-symbol blue"><svg class="icon"><use href="#i-spark"/></svg></span><span>요약 서식</span></button>
-      <button class="nav-item" data-action="replace"><span class="nav-symbol blue"><svg class="icon"><use href="#i-repeat"/></svg></span><span>일괄 수정</span></button>
     </nav>
     <nav class="sidebar-nav" aria-label="설정과 저장">
       <button class="nav-item" data-action="settings"><span class="nav-symbol gray"><svg class="icon"><use href="#i-settings"/></svg></span><span>모델 및 설정</span></button>
@@ -87,13 +86,13 @@
       <section class="panel transcript-panel" id="transcript-panel" role="tabpanel" aria-labelledby="tab-transcript">
         <div class="panel-title"><h2 id="transcript-title">받아쓰기</h2><span class="editable-label">직접 수정 가능</span></div>
         <label class="sr-only" for="transcript">받아쓰기 결과</label><textarea id="transcript" spellcheck="false" placeholder="받아쓰기를 확인하고 직접 수정하세요. 다른 곳의 텍스트를 붙여 넣어 요약할 수도 있습니다."></textarea>
-        <div class="panel-footer"><span class="text-count" id="transcript-count">0자</span><div class="footer-buttons"><button class="button" data-open-replace>일괄 수정</button><button class="button" id="clear-button">비우기</button><button class="button" id="save-transcript"><svg class="icon"><use href="#i-save"/></svg>저장…</button></div></div>
+        <div class="panel-footer"><span class="text-count" id="transcript-count">0자</span><div class="footer-buttons"><button class="button" id="clear-button">비우기</button><button class="button" id="save-transcript"><svg class="icon"><use href="#i-save"/></svg>저장…</button></div></div>
       </section>
       <section class="panel summary-panel" id="summary-panel" role="tabpanel" hidden aria-labelledby="tab-summary">
         <div class="summary-controls"><label for="prompt-select">서식</label><select id="prompt-select" aria-label="요약 서식"><option>일반 요약</option></select><button class="button primary" id="summary-button"><svg class="icon"><use href="#i-spark"/></svg><span>요약 생성</span></button><button class="button copy-button" id="copy-button" title="요약 결과 복사"><svg class="icon"><use href="#i-copy"/></svg><span>복사</span></button></div>
         <h2 id="summary-title" class="sr-only">요약</h2><div class="model-label" id="model-label">로컬 요약 모델을 확인하고 있습니다.</div>
         <label class="sr-only" for="summary">요약 결과</label><textarea id="summary" spellcheck="false" placeholder="서식을 고르고 요약을 생성하세요. 생성한 내용은 직접 편집할 수 있습니다."></textarea>
-        <div class="panel-footer"><span class="text-count" id="summary-count">0자</span><div class="footer-buttons"><button class="button" data-open-replace>일괄 수정</button><button class="button" id="save-summary"><svg class="icon"><use href="#i-save"/></svg>저장…</button></div></div>
+        <div class="panel-footer"><span class="text-count" id="summary-count">0자</span><div class="footer-buttons"><button class="button" id="summary-replace" data-open-replace>일괄 수정</button><button class="button" id="save-summary"><svg class="icon"><use href="#i-save"/></svg>저장…</button></div></div>
       </section>
     </section>
     <div class="drop-overlay">오디오 파일을 놓아 추가하세요</div>
@@ -120,7 +119,11 @@
 
 <dialog id="storage-dialog"><div class="dialog-heading"><div><h2 id="storage-title">Results</h2><p>이 컴퓨터에 저장된 파일</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body storage-list" id="storage-list"></div><div class="dialog-footer"><button class="button" data-close>닫기</button></div></dialog>
 
-<dialog id="replace-dialog"><form id="replace-form"><div class="dialog-heading"><div><h2>일괄 수정</h2><p>잘못 인식된 말을 받아쓰기와 요약에서 한 번에 바꿉니다.</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><div class="replace-head"><span>찾을 말</span><span></span><span>바꿀 말</span><span></span></div><div id="replace-rules" class="replace-rules"></div><button type="button" class="button" id="add-replace-rule">+ 규칙 추가</button><p class="field-note">띄어쓰기가 달라도 찾습니다. 예: ‘슬라시크레이트’ 규칙은 ‘슬라시 크레이트’도 바꿉니다.<br>저장한 규칙은 앞으로 만드는 받아쓰기와 요약에도 자동으로 적용됩니다.</p><div id="replace-error" class="inline-error" role="alert" hidden></div></div><div class="dialog-footer"><button type="button" class="button" data-close>닫기</button><button type="button" class="button" id="save-replace">규칙만 저장</button><button type="submit" class="button primary">저장하고 지금 바꾸기</button></div></form></dialog>
+<dialog id="replace-dialog"><form id="replace-form">
+  <div class="dialog-heading"><div><h2>이 요약 일괄 수정</h2><p id="replace-scope">현재 열어 둔 요약 본문에서만 수정합니다.</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div>
+  <div class="dialog-body"><div class="replace-head"><span>찾을 말</span><span></span><span>바꿀 말</span><span></span></div><div id="replace-rules" class="replace-rules"></div><button type="button" class="button" id="add-replace-rule">+ 규칙 추가</button><p class="field-note">띄어쓰기가 달라도 찾습니다. 예: ‘슬라시크레이트’ 규칙은 ‘슬라시 크레이트’도 바꿉니다.<br>저장한 규칙은 다음에 이 창을 열 때 불러옵니다.</p><div id="replace-error" class="inline-error" role="alert" hidden></div></div>
+  <div class="dialog-footer"><button type="button" class="button" data-close>닫기</button><button type="button" class="button" id="save-replace">규칙만 저장</button><button type="submit" class="button primary">이 요약에 적용</button></div>
+</form></dialog>
 <dialog id="info-dialog"><div class="dialog-heading"><h2 id="info-title"></h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body info-content" id="info-content"></div><div class="dialog-footer"><button class="button" data-close>닫기</button></div></dialog>
 <dialog id="confirm-dialog" class="small-dialog"><div class="dialog-heading"><h2>컨텍스트 길이 조정</h2></div><div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button class="button" id="confirm-no">취소</button><button class="button primary" id="confirm-yes">늘려서 실행</button></div></dialog>
 </body>

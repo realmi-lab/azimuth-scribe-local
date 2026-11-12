@@ -89,6 +89,9 @@ async function main() {
   assert.equal($("file-count").textContent, "0개");
   assert.equal($("prompt-select").options.length, 4);
   assert.equal($("stt-button").disabled, true);
+  assert.equal(d.querySelector('.app-sidebar [data-action="replace"]'), null);
+  assert.equal($("transcript-panel").querySelector("[data-open-replace]"), null);
+  assert.equal(d.querySelectorAll("[data-open-replace]").length, 1);
   process.stdout.write("PASS: initial UI state, empty file list, four prompt choices\n");
   const realFetch = w.fetch;
   w.fetch = async (url, options) => {
@@ -142,6 +145,42 @@ async function main() {
   $("transcript").dispatchEvent(new w.Event("input", {bubbles:true}));
   await until(async () => (await readState()).files[0].transcript === "이 녹음만 수정합니다.", "scoped recording autosave");
   assert.equal((await readState()).transcript, "");
+
+  const secondUpload = new FormData();
+  secondUpload.append("files", new Blob([wav], {type:"audio/wav"}), "다른회의.wav");
+  const secondFile = (await (await fetch(base + "/api/files", {method:"POST", headers:{Cookie:authCookie,"X-Scribe-Request":"1"}, body:secondUpload})).json()).files[0];
+  const setText = body => fetch(base + "/api/text", {method:"PATCH", headers:{Cookie:authCookie,"X-Scribe-Request":"1","Content-Type":"application/json"}, body:JSON.stringify(body)});
+  await setText({file_id:secondFile.id, transcript:"다른 녹음 원문", summary:"녹음별 요약 내용"});
+  await setText({summary:"녹음별 요약 내용"});
+  w.dispatchEvent(new w.Event("hashchange"));
+  await until(() => $("file-list").querySelectorAll(".history-card").length === 2, "second recording loaded");
+  $("tab-summary").click(); $("summary-replace").click();
+  assert.equal($("replace-dialog").open, true);
+  assert.ok($("replace-scope").textContent.includes("회의자료"));
+  d.querySelector(".replace-find").value = "요약";
+  d.querySelector(".replace-to").value = "수정된 요약";
+  $("replace-form").dispatchEvent(new w.Event("submit", {bubbles:true,cancelable:true}));
+  await until(() => !$("replace-dialog").open && $("toast").querySelector(".toast-action"), "summary correction and undo ready");
+  let corrected = await readState();
+  assert.equal(corrected.files.find(f => f.id === fileId).summary, "녹음별 수정된 요약 내용");
+  assert.equal(corrected.files.find(f => f.id === fileId).transcript, "이 녹음만 수정합니다.");
+  assert.equal(corrected.files.find(f => f.id === secondFile.id).summary, "녹음별 요약 내용");
+  assert.equal(corrected.summary, "녹음별 요약 내용");
+  // Undo after changing records must still address only the original summary.
+  $("back-to-history").click();
+  await until(() => !$("history-view").hidden, "history before switching summaries");
+  const secondCard = $("file-list").querySelector(`[data-id="${secondFile.id}"]`);
+  secondCard.querySelector('[data-tab="summary"]').click(); secondCard.querySelector(".card-open").click();
+  await until(() => $("detail-title").textContent.includes("다른회의"), "different summary opened");
+  $("summary").value = "다른 요약의 새 편집"; $("summary").dispatchEvent(new w.Event("input", {bubbles:true}));
+  await until(async () => (await readState()).files.find(f => f.id === secondFile.id).summary === "다른 요약의 새 편집", "other summary edit saved");
+  $("toast").querySelector(".toast-action").click();
+  await until(async () => (await readState()).files.find(f => f.id === fileId).summary === "녹음별 요약 내용", "scoped undo");
+  corrected = await readState();
+  assert.equal(corrected.files.find(f => f.id === secondFile.id).summary, "다른 요약의 새 편집");
+  assert.equal(corrected.summary, "녹음별 요약 내용");
+  assert.equal(corrected.files.find(f => f.id === fileId).transcript, "이 녹음만 수정합니다.");
+  process.stdout.write("PASS: summary-only correction, explicit record scope, sidebar removal and scoped undo\n");
   $("nav-notes").click();
   await until(() => $("detail-title").textContent === "전체 메모" && $("transcript").value === "", "global memo stays separate");
   process.stdout.write("PASS: searchable history cards, scoped editing, preview/copy, player persistence and reprocessing choices\n");

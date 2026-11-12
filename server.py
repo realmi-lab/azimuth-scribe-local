@@ -139,10 +139,10 @@ def replacement_pattern(find):
     return re.compile(r"\s*".join(re.escape(c) for c in chars)) if chars else None
 
 
-def apply_replacements(text, rules=None):
+def apply_replacements(text, rules):
     """Apply batch-correction rules in order; returns (new_text, number_of_replacements)."""
     count = 0
-    for rule in REPLACEMENTS if rules is None else rules:
+    for rule in rules:
         pattern = replacement_pattern(rule["find"])
         if pattern and text:
             text, n = pattern.subn(lambda _match, value=rule["replace"]: value, text)
@@ -636,7 +636,7 @@ def transcribe(file_id: str | None = None, body: TranscriptionRequest | None = N
                         progress = (index + min(segment.end / info.duration, 0.99)) / len(selected)
                         job_update(progress=progress)
                 check_cancel()
-                text, _ = apply_replacements(" ".join(part for part in parts if part))
+                text = " ".join(part for part in parts if part)
                 with LOCK:
                     item.update(status="Completed", transcript=text)
                     block = f"[{item['name']}]\n{text}" if text else f"[{item['name']}]\n(인식된 음성 없음)"
@@ -833,8 +833,6 @@ def summarize(body: SummaryRequest):
             raise RuntimeError("모델이 빈 응답을 반환했습니다. 모델과 입력 텍스트를 확인하세요.")
         job_update(message="출력 토큰 한도에 도달했습니다. 설정에서 최대 출력 토큰을 늘려 주세요." if reason == "length"
                    else "요약이 완료되었습니다." + (f" (긴 회의 · {len(chunks)}개 구간)" if len(chunks) > 1 else ""))
-        with LOCK:
-            target["summary"], _ = apply_replacements(target["summary"])
         persist()
         RT.ollama_checked = 0
 
@@ -901,16 +899,25 @@ def save_replacements(body: ReplacementUpdate):
     return {"ok": True, "rules": REPLACEMENTS}
 
 
+class SummaryReplacement(ReplacementUpdate):
+    file_id: str | None = Field(..., min_length=1, max_length=128)
+    rules: list[Replacement] = Field(min_length=1, max_length=200)
+
+
 @app.post("/api/replacements/apply")
-def apply_saved_replacements():
+def apply_summary_replacements(body: SummaryReplacement):
     with LOCK:
         if busy():
             raise HTTPException(409, "작업이 끝난 뒤 일괄 수정하세요.")
-        counts = {}
-        for key in ("transcript", "summary"):
-            STATE[key], counts[key] = apply_replacements(STATE[key])
+        target = STATE
+        if body.file_id is not None:
+            target = next((file for file in STATE["files"] if file["id"] == body.file_id), None)
+            if target is None:
+                raise HTTPException(404, "수정할 요약의 기록을 찾을 수 없습니다.")
+        rules = [{"find": rule.find, "replace": rule.replace} for rule in body.rules]
+        target["summary"], count = apply_replacements(target.get("summary", ""), rules)
         persist()
-    return {"count": counts["transcript"] + counts["summary"], **counts}
+        return {"file_id": body.file_id, "summary": target["summary"], "count": count}
 
 
 class PromptUpdate(BaseModel):

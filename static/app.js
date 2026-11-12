@@ -5,6 +5,7 @@ let seenJob = "", toastTimer, exportKind = "transcript";
 let draftPrompts = {}, editingPrompt = "", pollCounter = 0;
 let openingDeepLink = false;
 let privateGeneration = 0, editingFileId = null, pendingFileId = null, exportFileId = null;
+let replaceFileId = null;
 const editorSource = () => (editingFileId ? state?.files.find(file => file.id === editingFileId) : state) || {};
 function showDialog(dialog) { if (!document.body.classList.contains("vault-locked")) dialog.showModal(); }
 const isBusy = () => ["running", "stopping"].includes(state?.runtime.job?.status);
@@ -53,6 +54,7 @@ function formatDuration(seconds) {
 function updateCounts() {
   $("transcript-count").textContent = `${$("transcript").value.length.toLocaleString()}자`;
   $("summary-count").textContent = `${$("summary").value.length.toLocaleString()}자`;
+  $("summary-replace").disabled = isBusy() || !$("summary").value.trim();
 }
 function renderFiles() { window.ScribeHistory?.render(state); }
 
@@ -351,8 +353,7 @@ async function openStorage(kind) {
   }
   showDialog($("storage-dialog"));
 }
-// Batch correction: saved find→replace rules, applied to the current text on demand
-// and by the server to every new transcript and summary.
+// Batch correction is an explicit action on the summary opened in this dialog.
 function addReplaceRow(rule = {find: "", replace: ""}) {
   const row = document.createElement("div"); row.className = "replace-rule";
   const field = (cls, value, label, example) => {
@@ -369,6 +370,9 @@ function addReplaceRow(rule = {find: "", replace: ""}) {
   return find;
 }
 function openReplace() {
+  if ($("detail-view").hidden || $("summary-panel").hidden || !$("summary").value.trim() || isBusy()) return;
+  replaceFileId = editingFileId;
+  $("replace-scope").textContent = `‘${$("detail-title").textContent}’의 요약 본문에서만 수정합니다.`;
   $("replace-rules").replaceChildren(); $("replace-error").hidden = true;
   const rules = state?.replacements || [];
   (rules.length ? rules : [undefined]).forEach(rule => addReplaceRow(rule));
@@ -379,7 +383,8 @@ async function saveReplaceRules() {
     .map(row => ({find: row.querySelector(".replace-find").value.trim(), replace: row.querySelector(".replace-to").value}))
     .filter(rule => rule.find);
   const saved = await api("/api/replacements", {method: "PUT", body: {rules}});
-  state.replacements = saved.rules; return saved.rules;
+  if (state) state.replacements = saved.rules;
+  return saved.rules;
 }
 function replaceAction(callback) {
   return async event => {
@@ -401,17 +406,23 @@ $("save-replace").addEventListener("click", replaceAction(async () => {
 }));
 $("replace-form").addEventListener("submit", replaceAction(async event => {
   event.preventDefault();
+  const targetId = replaceFileId, generation = privateGeneration;
   if (isBusy()) throw new Error("작업이 끝난 뒤 일괄 수정하세요.");
   const rules = await saveReplaceRules();
   if (!rules.length) throw new Error("찾을 말을 하나 이상 입력하세요.");
   await flushText();
-  const before = [{transcript: state.transcript, summary: state.summary},
-    ...state.files.map(file => ({file_id: file.id, transcript: file.transcript || "", summary: file.summary || ""}))];
-  const result = await api("/api/replacements/apply", {method: "POST"});
+  if (generation !== privateGeneration || !state) return;
+  const target = targetId ? state.files.find(file => file.id === targetId) : state;
+  if (!target) throw new Error("수정할 요약의 기록을 찾을 수 없습니다.");
+  const before = target.summary || "";
+  const result = await api("/api/replacements/apply", {method: "POST", body: {file_id: targetId, rules}});
+  if (generation !== privateGeneration) return;
+  target.summary = result.summary;
   $("replace-dialog").close(); await refresh();
   if (!result.count) return toast("바꿀 곳이 없습니다. 규칙은 저장했습니다.");
-  toastUndo(`${result.count}곳을 고쳤습니다 (받아쓰기 ${result.transcript} · 요약 ${result.summary}).`, async () => {
-    for (const body of before) await api("/api/text", {method: "PATCH", body});
+  toastUndo(`이 요약의 ${result.count}곳을 고쳤습니다.`, async () => {
+    await flushText();
+    await api("/api/text", {method: "PATCH", body: {file_id: targetId, summary: before}});
     await refresh(); toast("일괄 수정을 되돌렸습니다.");
   });
 }));
@@ -419,7 +430,7 @@ function showInfo(title, content) { $("info-title").textContent = title; $("info
 $("help-button").onclick = () => showInfo("Local LLM Encoder 사용 방법", `
   <h3>1. 녹음하거나 파일 추가</h3><p>녹음 시작을 눌러 마이크 권한을 허용한 뒤 대화를 녹음하세요. 녹음 종료로 마치면 16 kHz 모노 WAV로 저장됩니다. 기존 파일은 파일 추가로 여러 개를 추가할 수 있습니다.</p>
   <h3>2. 기록 카드에서 확인</h3><p>각 카드에서 음성을 재생하고 원문·요약을 전환할 수 있습니다. ‘다시 처리’에서 해당 음성의 받아쓰기나 요약 서식을 고르세요. 여러 파일은 체크 후 위쪽 받아쓰기를 누르면 됩니다. 검색 중에는 화면에 보이는 선택 항목만 처리합니다.</p>
-  <h3>3. 원문과 요약 편집</h3><p>카드의 제목이나 편집을 누르면 해당 기록을 넓게 열어 수정할 수 있습니다. ‘전체 메모’에서는 여러 받아쓰기의 합본과 직접 입력한 메모를 다룹니다.</p>
+  <h3>3. 원문과 요약 편집</h3><p>카드의 제목이나 편집을 누르면 해당 기록을 넓게 열어 수정할 수 있습니다. 요약 탭의 ‘일괄 수정’은 열어 둔 요약 본문에서만 찾아 바꿉니다. ‘전체 메모’에서는 여러 받아쓰기의 합본과 직접 입력한 메모를 다룹니다.</p>
   <h3>4. 저장과 내보내기</h3><p>편집 내용은 자동 저장됩니다. 저장 버튼으로 보관함에 TXT·Markdown 결과를 암호화해 보관할 수 있습니다. 일반 파일이 필요하면 저장 창에서 ‘일반 파일도 내보내기’를 선택하세요.</p>
   <h3>보관함 잠금</h3><p>Mac 앱에서 Touch ID 또는 Mac 로그인 암호로만 엽니다. 암호는 macOS 인증창에서 입력하며 별도 앱 비밀번호는 사용하지 않습니다. 5분 동안 사용하지 않으면 잠깁니다. 녹음 중 임시 파일은 보호 대상에서 제외됩니다. 백업에는 vault.json을 포함한 data 전체와 해당 보관함의 Mac 키체인 항목이 필요합니다. Mac 로그인 암호만으로 다른 Mac에서 복구할 수 없습니다.</p>
   <h3>모델과 데이터</h3><p>왼쪽 설정에서 모델, 언어, 실행 장치를 설정합니다. 모델 준비 시에만 모델 파일을 외부에서 내려받습니다. 음성·텍스트는 localhost에서 처리하며, 설치 앱의 녹음과 결과는 Application Support의 데이터 폴더에 보관합니다.</p>`);
@@ -433,7 +444,6 @@ document.querySelectorAll("[data-action]").forEach(button => button.addEventList
   const name = button.dataset.action;
   if (name === "settings") return openSettings(); if (name === "prompts") return openPrompts();
   if (name === "results" || name === "recordings") return openStorage(name);
-  if (name === "replace") return openReplace();
   openSave(name === "save-transcript" ? "transcript" : "summary");
 })));
 
@@ -519,7 +529,7 @@ window.flushBeforeVaultLock = flushText;
 window.addEventListener("vault-locked", () => {
   privateGeneration += 1;
   clearTimeout(saveTimer); pendingText = {}; state = null; draftPrompts = {}; editingPrompt = "";
-  seenJob = ""; editingFileId = pendingFileId = exportFileId = null;
+  seenJob = ""; editingFileId = pendingFileId = exportFileId = replaceFileId = null;
   window.ScribeHistory?.clear();
   for (const id of ["transcript", "summary", "prompt-editor", "new-prompt-name", "audio-input"]) $(id).value = "";
   $("file-list").replaceChildren(); $("replace-rules").replaceChildren(); $("storage-list").replaceChildren();

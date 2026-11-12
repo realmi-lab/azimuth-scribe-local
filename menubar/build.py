@@ -46,7 +46,7 @@ info = {
     "CFBundleName": "Local LLM Encoder", "CFBundleDisplayName": "Local LLM Encoder",
     "CFBundleIdentifier": "net.realmi.azimuth-scribe.local",
     "CFBundleExecutable": "AzimuthScribe", "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.3.0", "CFBundleVersion": "5",
+    "CFBundleShortVersionString": "1.3.1", "CFBundleVersion": "6",
     "CFBundleURLTypes": [{"CFBundleURLName": "Local LLM Encoder", "CFBundleURLSchemes": ["localllmencoder"]}],
     "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True,
     "NSMicrophoneUsageDescription": "메뉴 막대에서 시작한 녹음을 받아쓰려면 마이크 접근이 필요합니다.",

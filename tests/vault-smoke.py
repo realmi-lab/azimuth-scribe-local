@@ -238,6 +238,7 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                     s.ensure_whisper = lambda: SimpleNamespace(transcribe=lambda *_a, **_kw:
                         ([SimpleNamespace(text="범위 확인 결과", end=1)], SimpleNamespace(duration=1)))
                     try:
+                        await client.put("/api/replacements", json={"rules": [{"find": "범위확인결과", "replace": "자동 변경되면 안 됨"}]})
                         self.assertEqual((await client.post("/api/transcribe", json={"ids": []})).status_code, 400)
                         self.assertEqual((await client.post("/api/transcribe", json={"ids": ["legacy"]})).status_code, 200)
                         for _ in range(50):
@@ -256,6 +257,33 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await client.get(exported["url"])).text, SECRET)
                     self.assertEqual((await client.put("/api/replacements", json={"rules": [{"find": "개인회의", "replace": "회의"}]})).status_code, 200)
                     self.assertTrue((root / "replacements.json.enc").exists())
+                    # A target is mandatory; replacement changes only its summary.
+                    rules = [{"find": "개인회의", "replace": "회의"}]
+                    second_id = (await client.get("/api/state")).json()["files"][1]["id"]
+                    await client.patch("/api/text", json={"file_id": "legacy", "summary": "개인 회의 요약"})
+                    await client.patch("/api/text", json={"file_id": second_id, "summary": "개인 회의 다른 요약"})
+                    before = (await client.get("/api/state")).json()
+                    self.assertEqual((await client.post("/api/replacements/apply")).status_code, 422)
+                    self.assertEqual((await client.post("/api/replacements/apply", json={"rules": rules})).status_code, 422)
+                    self.assertEqual((await client.post("/api/replacements/apply", json={"file_id": "", "rules": rules})).status_code, 422)
+                    self.assertEqual((await client.post("/api/replacements/apply", json={"file_id": "missing", "rules": rules})).status_code, 404)
+                    changed = await client.post("/api/replacements/apply", json={"file_id": "legacy", "rules": rules})
+                    self.assertEqual(changed.status_code, 200)
+                    self.assertEqual(changed.json()["count"], 1)
+                    after = (await client.get("/api/state")).json()
+                    self.assertEqual(after["files"][0]["summary"], "회의 요약")
+                    self.assertEqual(after["files"][0]["transcript"], before["files"][0]["transcript"])
+                    self.assertEqual(after["files"][1], before["files"][1])
+                    self.assertEqual(after["transcript"], before["transcript"])
+                    self.assertEqual(after["summary"], before["summary"])
+                    # Explicit null addresses only the summary in the global memo.
+                    memo = await client.post("/api/replacements/apply", json={"file_id": None, "rules": rules})
+                    self.assertEqual(memo.status_code, 200)
+                    final = (await client.get("/api/state")).json()
+                    self.assertEqual(final["summary"], SECRET.replace("개인 회의", "회의"))
+                    self.assertEqual(final["transcript"], before["transcript"])
+                    self.assertEqual(final["files"], after["files"])
+                    await client.patch("/api/text", json={"summary": SECRET})
                     self.assertEqual((await client.patch("/api/text", json={"summary": "x"}, headers={"Origin": "https://example.com"})).status_code, 403)
                     self.assertEqual((await client.post("/api/vault/lock")).status_code, 200)
                     self.assertIsNone(s.VAULT._key)
