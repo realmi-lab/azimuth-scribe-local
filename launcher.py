@@ -86,7 +86,7 @@ def prepare_models(wait=False):
         return
     message = None
     while True:
-        current = request(URL + "/api/state")["runtime"]["job"]
+        current = request(URL + "/api/models/status")["job"]
         if not current or current["id"] != job["id"]:
             raise RuntimeError("모델 준비 작업이 변경되었습니다. 화면의 상태를 확인하세요.")
         if current["message"] != message:

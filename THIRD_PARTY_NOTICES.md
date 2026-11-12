@@ -13,6 +13,7 @@ The following separately installed open source components retain their own licen
 | Starlette | BSD-3-Clause | https://github.com/encode/starlette/blob/main/LICENSE.md |
 | Uvicorn | BSD-3-Clause | https://github.com/encode/uvicorn/blob/main/LICENSE.md |
 | HTTPX | BSD-3-Clause | https://github.com/encode/httpx/blob/master/LICENSE.md |
+| cryptography | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography/blob/main/LICENSE |
 | PyAV | BSD-3-Clause | https://github.com/PyAV-Org/PyAV/blob/main/LICENSE.txt |
 | FFmpeg (used by PyAV) | LGPL/GPL, depending on components/build | https://ffmpeg.org/legal.html |
 | NumPy | BSD-3-Clause | https://numpy.org/doc/stable/license.html |

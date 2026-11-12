@@ -14,6 +14,7 @@
 1. Apple Command Line Tools가 없다면 터미널에서 `xcode-select --install`을 실행해 설치를 마칩니다. [Apple 다운로드 안내](https://developer.apple.com/xcode/resources/)
 2. 위 ZIP을 풀고, 해당 폴더에서 `setup.command`를 실행합니다. 터미널에서는 `zsh setup.command`로 실행할 수 있습니다.
 3. 설치 완료 메시지가 나오면 `~/Applications/Local LLM Encoder.app`을 엽니다. Dock에 고정하려면 아이콘 우클릭 → 옵션 → Dock에 유지를 선택합니다.
+4. 패널에서 보관함 비밀번호를 12자 이상으로 설정합니다. 기존 녹음과 텍스트는 검증 후 암호화해 보관합니다. Mac 앱에서는 키체인 저장과 Touch ID/Mac 암호 인증을 사용할 수 있습니다. [암호화·백업·보호 범위](docs/security.md)
 
 설치 파일은 Python 3.12, 잠긴 Python 의존성, Ollama, Whisper small, Qwen3 4B Instruct를 준비합니다. Python은 [uv의 관리형 Python 다운로드](https://docs.astral.sh/uv/guides/install-python/)를 사용합니다. Ollama가 없으면 공식 `v0.33.3` CLI 배포본을 받아 SHA-256을 확인하고 앱 전용 폴더에 설치합니다. 기존 Ollama가 있으면 그대로 사용합니다. 처음에는 인터넷과 모델 약 3GB 외에 Python 환경·다운로드 임시 공간이 필요합니다.
 
@@ -115,20 +116,27 @@ python3 launcher.py --stop
 
 | 경로 | 내용 |
 | --- | --- |
-| `data/Recordings/` | 녹음 및 불러온 음성 파일 사본 |
-| `data/Results/` | 저장한 TXT·Markdown 결과 |
-| `data/workspace.json` | 파일 목록, 받아쓰기, 요약 |
+| `data/Recordings/*.enc` | 암호화된 녹음 및 불러온 음성 파일 사본 |
+| `data/Results/*.enc` | 암호화된 TXT·Markdown 결과 |
+| `data/workspace.json.enc` | 암호화된 파일 목록, 받아쓰기, 요약 |
+| `data/vault.json` | 비밀번호로 암호화한 보관함 키와 복호화 메타데이터 |
 | `data/settings.json` | 모델과 언어 설정 |
-| `data/prompts.json` | 사용자 요약 서식 |
+| `data/prompts.json.enc`, `data/replacements.json.enc` | 암호화된 사용자 서식과 일괄 수정 규칙 |
 | `data/models/` | Whisper 모델 |
 | `data/server.log`, `data/ollama.log` | 이 실행기가 시작한 프로세스의 로그 |
 | `.venv/`, `.bootstrap/` | 전용 Python 환경과 부트스트랩 도구 |
 | `.vendor/ollama-0.33.3/` | 기존 Ollama가 없을 때 설치하는 공식 CLI와 라이브러리 |
 | `~/.ollama/models/` | Ollama의 로컬 모델 (기존 Ollama와 공유) |
 
-백업 시 `data/`를 복사합니다. 앱에서 파일을 목록에서 제거해도 보관된 음성은 남습니다. 필요한 보관·삭제는 이 폴더에서 직접 관리할 수 있습니다. 화면에는 예시 녹음이나 가상의 요약을 넣지 않았습니다.
+백업 시 서버를 중지하고 `vault.json`을 포함한 `data/` 전체를 복사합니다. 보관함 비밀번호도 필요합니다. 목록에서 제거해도 암호화된 음성은 남습니다. 기존에 가져온 원본·이전 백업은 자동으로 변경하지 않습니다. [보호 범위와 복구 안내](docs/security.md)를 확인하세요.
 
 ## 검증
+
+암호화 저장·검증 이관·잠금 후 API 차단·자동 잠금은 임시 데이터로 검사합니다.
+
+```sh
+.venv/bin/python tests/vault-smoke.py
+```
 
 실제 로컬 모델로 한국어 합성 음성을 변환하고 요약하는 통합 검증입니다. 테스트 데이터는 임시 폴더에만 만들고 실제 작업 데이터를 수정하지 않습니다. macOS의 `say`와 이미 준비된 모델이 필요합니다. 소스 폴더에 개발용 Python 환경이 없다면 먼저 `python3 bootstrap.py --python-only`를 실행합니다.
 

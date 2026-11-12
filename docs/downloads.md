@@ -52,7 +52,7 @@ Ollama를 앱 전용 폴더에 설치한 경우 CLI는 `~/Library/Application Su
 | Python | 설치기가 **3.12** 환경을 준비 | [Python](https://www.python.org/downloads/), [uv 관리형 Python](https://docs.astral.sh/uv/guides/install-python/) |
 | uv | 기존 uv 사용, 없으면 전용 환경에 **0.13.7** 설치 | [PyPI](https://pypi.org/project/uv/0.13.7/) |
 | Ollama | 기존 설치 사용, 없으면 공식 CLI **0.33.3** 설치 | [다운로드 페이지](https://ollama.com/download), [고정 버전 배포본](https://github.com/ollama/ollama/releases/tag/v0.33.3) |
-| Python 패키지 | FastAPI, Uvicorn, faster-whisper, CTranslate2, PyAV, HTTPX 및 전이 의존성 | [전체 잠금 파일](../requirements-lock.txt), [직접 의존성 범위](../requirements.txt) |
+| Python 패키지 | FastAPI, Uvicorn, faster-whisper, CTranslate2, PyAV, HTTPX, cryptography 및 전이 의존성 | [전체 잠금 파일](../requirements-lock.txt), [직접 의존성 범위](../requirements.txt) |
 
 Ollama 자동 설치의 고정 배포 파일:
 
@@ -72,3 +72,5 @@ PyAV가 사용하는 FFmpeg 라이브러리는 [공식 binary wheel](https://pya
 기존 설치를 업데이트할 때는 메뉴의 **모두 종료**로 이 앱이 시작한 프로세스를 종료하고, 같은 소스 폴더에서 `git pull` 후 `zsh setup.command`를 실행합니다. 기존 데이터와 모델은 유지됩니다. 기존 Ollama 프로세스를 공유한 경우에는 그 프로세스를 종료하지 않습니다.
 
 녹음·텍스트·설정·모델·로그·Python 가상환경은 Git에 올리지 않습니다. 백업은 `~/Library/Application Support/Azimuth Scribe Local/data/`를 복사합니다. 모델과 의존성의 라이선스는 [Third-party notices](../THIRD_PARTY_NOTICES.md)를 확인하세요.
+
+1.1.0부터 보관함 비밀번호 설정 후 녹음·텍스트를 암호화합니다. `vault.json`과 `.enc` 파일을 함께 백업하고 비밀번호를 따로 보관하세요. [암호화와 기존 데이터 이관](security.md)을 확인하세요. 기존 모델 준비 명령은 잠긴 상태에서도 사용할 수 있습니다.

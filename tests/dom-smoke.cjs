@@ -13,7 +13,7 @@ const log = fs.openSync(path.join(folder, "server.log"), "w");
 const child = spawn(path.join(root, ".venv/bin/python"), [path.join(root, "server.py")], {
   env: {...process.env, SCRIBE_DATA_DIR: folder, SCRIBE_PORT: "8767"}, stdio: ["ignore", log, log]
 });
-let dom;
+let dom, authCookie = "";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, message, limit = 10000) {
   const end = Date.now() + limit;
@@ -23,7 +23,7 @@ async function until(predicate, message, limit = 10000) {
   }
   throw new Error(`Timeout: ${message}`);
 }
-async function readState() { return (await fetch(base + "/api/state")).json(); }
+async function readState() { return (await fetch(base + "/api/state", {headers: {Cookie: authCookie}})).json(); }
 async function main() {
   await until(async () => { try { return (await fetch(base + "/api/health")).ok; } catch { return false; } }, "test server readiness");
   const errors = [], downloads = [];
@@ -33,12 +33,24 @@ async function main() {
     url: base, runScripts: "outside-only", pretendToBeVisual: true, virtualConsole: console
   });
   const w = dom.window, d = w.document, $ = id => d.getElementById(id);
-  w.fetch = (url, options) => fetch(new URL(url, base), options);
+  w.fetch = async (url, options = {}) => {
+    const response = await fetch(new URL(url, base), {...options, headers: {...options.headers, Cookie: authCookie}});
+    const cookie = response.headers.get("set-cookie");
+    if (cookie) authCookie = cookie.split(";")[0];
+    return response;
+  };
   w.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
   w.HTMLDialogElement.prototype.close = function() { this.open = false; };
   w.HTMLAnchorElement.prototype.click = function() { downloads.push(this.href); };
   w.addEventListener("error", e => errors.push(e.error));
-  w.eval(fs.readFileSync(path.join(root, "static/app.js"), "utf8"));
+  w.eval(["vault.js", "app.js", "panel.js"].map(name => fs.readFileSync(path.join(root, "static", name), "utf8")).join("\n"));
+  await until(() => $("vault-title").textContent.includes("만들기"), "vault setup form");
+  assert.equal(d.body.classList.contains("vault-locked"), true);
+  assert.equal((await fetch(base + "/api/state")).status, 423);
+  $("vault-password").value = $("vault-confirm").value = "test-only-browser-vault-password";
+  $("vault-form").dispatchEvent(new w.Event("submit", {bubbles:true, cancelable:true}));
+  await until(() => $("vault-gate").hidden, "vault setup complete");
+  process.stdout.write("PASS: initial vault lock and password setup\n");
   await until(() => $("app-status").textContent.includes("모델"), "initial DOM render");
   assert.equal($("file-count").textContent, "0 files");
   assert.equal($("prompt-select").options.length, 4);
@@ -73,13 +85,26 @@ async function main() {
   process.stdout.write("PASS: preferences and custom prompt editor event handling\n");
 
   $("save-transcript").click(); assert.equal($("save-dialog").open, true);
-  $("save-format").value = "md";
+  $("save-format").value = "md"; $("save-plain").checked = true;
   $("save-form").dispatchEvent(new w.Event("submit", {bubbles: true, cancelable: true}));
   await until(() => downloads.length === 1, "export click");
-  assert.equal(await (await fetch(downloads[0])).text(), $("transcript").value);
+  assert.equal(await (await fetch(downloads[0], {headers: {Cookie: authCookie}})).text(), $("transcript").value);
   assert.ok(downloads[0].endsWith(".md"));
   $("help-button").click(); assert.ok($("info-content").textContent.includes("localhost")); $("info-dialog").close();
   $("licenses-button").click(); assert.ok($("info-content").textContent.includes("faster-whisper")); $("info-dialog").close();
+  $("vault-lock").click();
+  await until(() => !$("vault-gate").hidden, "vault manual lock");
+  assert.equal($("transcript").value, "");
+  assert.equal($("prompt-editor").value, "");
+  assert.equal((await fetch(base + "/api/state", {headers:{Cookie:authCookie}})).status, 423);
+  $("vault-password").value = "wrong-password";
+  $("vault-form").dispatchEvent(new w.Event("submit", {bubbles:true, cancelable:true}));
+  await until(() => $("vault-error").textContent.includes("올바르지"), "wrong password error");
+  $("vault-password").value = "test-only-browser-vault-password";
+  $("vault-form").dispatchEvent(new w.Event("submit", {bubbles:true, cancelable:true}));
+  await until(() => $("vault-gate").hidden && $("transcript").value.includes("제품 시연"), "unlock restores encrypted text");
+  assert.equal($("vault-password").value, "");
+  process.stdout.write("PASS: manual lock clears private UI, password errors and encrypted restore\n");
   assert.deepEqual(errors.map(e => e.message), []);
   process.stdout.write("PASS: Markdown save/download, help, notices and no JavaScript runtime errors\n");
 }

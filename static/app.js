@@ -4,6 +4,8 @@ let state = null, refreshing = false, pendingText = {}, saveTimer, saveChain = P
 let currentFileSignature = "", seenJob = "", toastTimer, exportKind = "transcript";
 let draftPrompts = {}, editingPrompt = "", pollCounter = 0;
 let openingDeepLink = false;
+let privateGeneration = 0;
+function showDialog(dialog) { if (!document.body.classList.contains("vault-locked")) dialog.showModal(); }
 const isBusy = () => ["running", "stopping"].includes(state?.runtime.job?.status);
 const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 
@@ -20,6 +22,7 @@ async function api(path, options = {}) {
     options.body = JSON.stringify(options.body);
   }
   const response = await fetch(path, {...options, headers});
+  if (response.status === 401 || response.status === 423) window.ScribeVault.requireUnlock();
   let data;
   try { data = await response.json(); } catch { throw new Error("로컬 서버 응답을 읽을 수 없습니다."); }
   if (!response.ok) throw new ApiError(data.detail || "요청을 처리할 수 없습니다.", response.status);
@@ -129,7 +132,11 @@ async function refresh(force = false) {
   if (refreshing) return;
   refreshing = true;
   try {
-    state = await api(`/api/state${force ? "?refresh=true" : ""}`);
+    if (!await window.ScribeVault.sync()) return;
+    const generation = privateGeneration;
+    const nextState = await api(`/api/state${force ? "?refresh=true" : ""}`);
+    if (generation !== privateGeneration || document.body.classList.contains("vault-locked")) return;
+    state = nextState;
     render();
     if (location.hash === "#settings" && !openingDeepLink) {
       openingDeepLink = true;
@@ -203,7 +210,7 @@ $("stt-button").addEventListener("click", action(async () => {
   await flushText(); await api("/api/transcribe", {method: "POST"}); await refresh();
 }));
 async function confirmContext(message) {
-  $("confirm-message").textContent = message; $("confirm-dialog").showModal();
+  $("confirm-message").textContent = message; showDialog($("confirm-dialog"));
   return new Promise(resolve => {
     const finish = answer => { $("confirm-dialog").close(); resolve(answer); };
     $("confirm-yes").onclick = () => finish(true); $("confirm-no").onclick = () => finish(false);
@@ -226,14 +233,23 @@ $("copy-button").addEventListener("click", action(async () => { await navigator.
 
 function openSave(kind) {
   if (!$(kind).value.trim()) return toast("저장할 내용이 없습니다.", true);
-  exportKind = kind; $("save-title").textContent = kind === "transcript" ? "받아쓰기 저장" : "요약 저장"; $("save-dialog").showModal();
+  exportKind = kind; $("save-plain").checked = false;
+  $("save-title").textContent = kind === "transcript" ? "받아쓰기 저장" : "요약 저장"; showDialog($("save-dialog"));
 }
 $("save-transcript").onclick = () => openSave("transcript"); $("save-summary").onclick = () => openSave("summary");
 $("save-form").addEventListener("submit", action(async e => {
   e.preventDefault(); await flushText();
   const result = await api("/api/export", {method: "POST", body: {kind: exportKind, format: $("save-format").value}});
-  const link = document.createElement("a"); link.href = result.url; link.download = result.filename;
-  if (!document.body.dataset.panel) { document.body.append(link); link.click(); link.remove(); } $("save-dialog").close(); toast("Results 폴더에 저장했습니다.");
+  if (document.body.classList.contains("vault-locked")) return;
+  if ($("save-plain").checked) {
+    if (window.webkit?.messageHandlers?.scribeVault) {
+      window.ScribeVault.bridge({action: "export", url: result.url, filename: result.filename});
+    } else {
+      const link = document.createElement("a"); link.href = result.url; link.download = result.filename;
+      document.body.append(link); link.click(); link.remove();
+    }
+  }
+  $("save-dialog").close(); toast("Results 폴더에 암호화해 저장했습니다.");
 }));
 document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 document.addEventListener("click", e => document.querySelectorAll("details.menu[open]").forEach(menu => { if (!menu.contains(e.target)) menu.open = false; }));
@@ -270,7 +286,7 @@ async function openSettings() {
   for (const [key, value] of Object.entries(state.settings)) {
     const field = $("settings-form").elements.namedItem(key); if (field) field.value = value;
   }
-  $("settings-error").hidden = true; renderSystemStatus(); $("settings-dialog").showModal();
+  $("settings-error").hidden = true; renderSystemStatus(); showDialog($("settings-dialog"));
 }
 function settingsData() {
   const data = Object.fromEntries(new FormData($("settings-form")));
@@ -307,7 +323,7 @@ function renderPromptEditor(name) {
 function openPrompts() {
   if (!state || isBusy()) return toast("작업이 끝난 뒤 서식을 변경할 수 있습니다.");
   draftPrompts = {...state.prompts}; renderPromptEditor($("prompt-select").value);
-  $("new-prompt-name").value = ""; $("prompts-dialog").showModal();
+  $("new-prompt-name").value = ""; showDialog($("prompts-dialog"));
 }
 $("edit-prompt-select").addEventListener("change", () => { savePromptDraft(); renderPromptEditor($("edit-prompt-select").value); });
 $("add-prompt").addEventListener("click", () => {
@@ -322,7 +338,10 @@ $("prompts-form").addEventListener("submit", action(async e => {
   $("prompts-dialog").close(); await refresh(); toast("요약 서식을 저장했습니다.");
 }));
 async function openStorage(kind) {
-  const data = await api(`/api/storage/${kind}`); $("storage-title").textContent = kind === "results" ? "Results · 저장 결과" : "Recordings · 녹음 파일";
+  const generation = privateGeneration;
+  const data = await api(`/api/storage/${kind}`);
+  if (generation !== privateGeneration || document.body.classList.contains("vault-locked")) return;
+  $("storage-title").textContent = kind === "results" ? "Results · 저장 결과" : "Recordings · 녹음 파일";
   $("storage-list").replaceChildren();
   if (!data.files.length) {
     const empty = document.createElement("p"); empty.className = "storage-empty"; empty.textContent = "저장된 파일이 없습니다."; $("storage-list").append(empty);
@@ -338,14 +357,21 @@ async function openStorage(kind) {
         const response = await fetch(file.url);
         if (!response.ok) throw new Error("결과를 열 수 없습니다.");
         preview.textContent = await response.text();
+        if (generation !== privateGeneration || document.body.classList.contains("vault-locked")) return;
         $("storage-list").querySelector(".file-preview")?.remove();
         preview.className = "file-preview";
         row.after(preview);
       }));
+    } else if (window.webkit?.messageHandlers?.scribeVault) {
+      link.addEventListener("click", event => {
+        event.preventDefault();
+        window.ScribeVault.bridge({action: "export", url: file.url, filename: file.name});
+      });
     }
+    link.title = kind === "recordings" ? "암호화를 해제한 일반 음성 파일 내보내기" : "저장 결과 열기";
     row.append(link, size); $("storage-list").append(row);
   }
-  $("storage-dialog").showModal();
+  showDialog($("storage-dialog"));
 }
 // Batch correction: saved find→replace rules, applied to the current text on demand
 // and by the server to every new transcript and summary.
@@ -368,7 +394,7 @@ function openReplace() {
   $("replace-rules").replaceChildren(); $("replace-error").hidden = true;
   const rules = state?.replacements || [];
   (rules.length ? rules : [undefined]).forEach(rule => addReplaceRow(rule));
-  $("replace-dialog").showModal();
+  showDialog($("replace-dialog"));
 }
 async function saveReplaceRules() {
   const rules = [...document.querySelectorAll(".replace-rule")]
@@ -409,12 +435,13 @@ $("replace-form").addEventListener("submit", replaceAction(async event => {
     await api("/api/text", {method: "PATCH", body: before}); await refresh(); toast("일괄 수정을 되돌렸습니다.");
   });
 }));
-function showInfo(title, content) { $("info-title").textContent = title; $("info-content").innerHTML = content; $("info-dialog").showModal(); }
+function showInfo(title, content) { $("info-title").textContent = title; $("info-content").innerHTML = content; showDialog($("info-dialog")); }
 $("help-button").onclick = () => showInfo("Local LLM Encoder 사용 방법", `
   <h3>1. 녹음하거나 파일 추가</h3><p>Start record를 눌러 마이크 권한을 허용한 뒤 대화를 녹음하세요. Stop record로 마치면 16 kHz 모노 WAV로 저장됩니다. 기존 파일은 Add로 여러 개를 추가할 수 있습니다.</p>
   <h3>2. 음성을 텍스트로 변환</h3><p>변환할 파일을 체크하고 STT를 누르세요. 선택 순서가 아닌 목록 순서대로 처리합니다. Stop을 누르면 현재 구간 처리 후 멈추며, 완료된 파일의 결과는 남습니다.</p>
   <h3>3. 받아쓰기 확인</h3><p>오인식된 이름, 숫자, 날짜 등을 직접 고치세요. 다른 곳에서 작성한 대화를 붙여 넣어 요약할 수도 있습니다.</p>
-  <h3>4. 요약과 저장</h3><p>일반 요약·회의록·진료 기록·법률 상담 중 서식을 고르고 Summary를 누르세요. 결과는 생성되는 대로 표시됩니다. Copy to Clipboard로 복사하거나 Save…로 TXT·Markdown 파일을 저장하세요.</p>
+  <h3>4. 요약과 저장</h3><p>서식을 고르고 요약을 생성하세요. 결과는 생성되는 대로 표시됩니다. 저장하면 보관함에 암호화해 보관합니다. 일반 TXT·Markdown이 필요하면 저장 창에서 ‘일반 파일도 내보내기’를 선택하세요.</p>
+  <h3>보관함 잠금</h3><p>보관함 비밀번호로 열 수 있으며 Mac 앱에서는 키체인과 본인 인증을 사용할 수 있습니다. 5분 동안 사용하지 않으면 잠깁니다. 녹음 중 임시 파일은 보호 대상에서 제외됩니다. 백업할 때는 서버를 중지하고 vault.json을 포함한 data 전체와 보관함 비밀번호를 보관하세요.</p>
   <h3>모델과 데이터</h3><p>Settings → Preferences에서 모델, 언어, 실행 장치를 설정합니다. 모델 준비 시에만 모델 파일을 외부에서 내려받습니다. 음성·텍스트는 localhost에서 처리하며, 녹음과 결과는 이 프로젝트의 data 폴더에 보관합니다. 입력한 텍스트와 설정도 자동으로 저장됩니다.</p>`);
 $("licenses-button").onclick = () => showInfo("Third-Party Licenses", `
   <p>원본의 공개 소개와 매뉴얼을 참고해 localhost용으로 새로 구현한 프로그램입니다.</p>
@@ -493,7 +520,7 @@ async function startRecording() {
     $("record-hint").textContent = "녹음 중 · 마치려면 Stop record"; $("record-time").hidden = false;
     $("record-time").textContent = "00:00"; setButton($("record-button"), "Stop record", "stop", true);
     $("record-button").disabled = false;
-    recordingTimer = setInterval(() => { $("record-time").textContent = formatDuration((performance.now() - recordingStarted) / 1000); }, 250);
+    recordingTimer = setInterval(() => { $("record-time").textContent = formatDuration((performance.now() - recordingStarted) / 1000); window.ScribeVault.touch(); }, 250);
   } catch (error) {
     resetRecorder(); recorderReady();
     throw new Error(error.name === "NotAllowedError" ? "브라우저에서 마이크 접근을 허용한 뒤 다시 시도하세요." : `마이크를 시작할 수 없습니다. ${error.message}`);
@@ -508,6 +535,18 @@ $("record-button").addEventListener("click", action(async () => {
 window.addEventListener("beforeunload", event => {
   if (recorder?.state === "recording" || unsavedRecording || Object.keys(pendingText).length) { event.preventDefault(); event.returnValue = ""; }
 });
+window.flushBeforeVaultLock = flushText;
+window.addEventListener("vault-locked", () => {
+  privateGeneration += 1;
+  clearTimeout(saveTimer); pendingText = {}; state = null; draftPrompts = {}; editingPrompt = "";
+  currentFileSignature = ""; seenJob = "";
+  for (const id of ["transcript", "summary", "prompt-editor", "new-prompt-name", "audio-input"]) $(id).value = "";
+  $("file-list").replaceChildren(); $("replace-rules").replaceChildren(); $("storage-list").replaceChildren();
+  $("info-content").replaceChildren(); $("toast").hidden = true; updateCounts();
+  if (recorder?.state === "recording") recorder.stop();
+});
+window.addEventListener("vault-unlocked", () => setTimeout(() => refresh(), 0));
+window.addEventListener("vault-native-error", event => toast(event.detail, true));
 refresh();
 window.addEventListener("hashchange", () => refresh());
 setInterval(() => { if (isBusy() || ++pollCounter % 8 === 0) refresh(); }, 900);

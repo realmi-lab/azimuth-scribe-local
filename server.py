@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -21,10 +22,11 @@ os.environ.setdefault("DO_NOT_TRACK", "1")
 import av
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from vault import Vault, VaultError, COOKIE, IDLE_SECONDS, BLOCK
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("SCRIBE_DATA_DIR", str(ROOT / "data"))).resolve()
@@ -77,16 +79,18 @@ def load_json(path: Path, default):
         raise RuntimeError(f"{path.name}을 읽을 수 없습니다. 원본을 보존한 뒤 파일을 확인하세요.") from exc
 
 
-STATE = load_json(DATA / "workspace.json", {"files": [], "transcript": "", "summary": ""})
+VAULT = Vault(DATA)
+EMPTY_STATE = {"files": [], "transcript": "", "summary": ""}
+STATE = copy.deepcopy(EMPTY_STATE)
 CONFIG = Settings(**load_json(DATA / "settings.json", {}))
-PROMPTS = load_json(DATA / "prompts.json", DEFAULT_PROMPTS)
-REPLACEMENTS = load_json(DATA / "replacements.json", [])
-for item in STATE["files"]:
-    if item["status"] == "Processing":
-        item["status"] = "Pending"
+PROMPTS = copy.deepcopy(DEFAULT_PROMPTS)
+REPLACEMENTS = []
 
 
 def write_json(path: Path, value):
+    if path.name in ("workspace.json", "prompts.json", "replacements.json"):
+        VAULT.save_json(path, value)
+        return
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(path)
@@ -94,7 +98,38 @@ def write_json(path: Path, value):
 
 def persist():
     with LOCK:
-        write_json(DATA / "workspace.json", STATE)
+        if VAULT._key is not None:
+            write_json(DATA / "workspace.json", STATE)
+
+
+def load_private():
+    global STATE, PROMPTS, REPLACEMENTS
+    STATE = VAULT.load_json(DATA / "workspace.json", copy.deepcopy(EMPTY_STATE))
+    PROMPTS = VAULT.load_json(DATA / "prompts.json", copy.deepcopy(DEFAULT_PROMPTS))
+    REPLACEMENTS = VAULT.load_json(DATA / "replacements.json", [])
+    for item in STATE["files"]:
+        if item["status"] == "Processing":
+            item["status"] = "Pending"
+    persist()
+
+
+def finish_lock():
+    global STATE, PROMPTS, REPLACEMENTS
+    VAULT.lock()
+    STATE = copy.deepcopy(EMPTY_STATE)
+    PROMPTS = copy.deepcopy(DEFAULT_PROMPTS)
+    REPLACEMENTS = []
+    RT.job = None
+
+
+def request_lock():
+    with LOCK:
+        VAULT.closing = True
+        VAULT.sessions.clear()
+        if busy():
+            RT.cancel.set()
+        elif RT.private_requests == 0:
+            finish_lock()
 
 
 def replacement_pattern(find):
@@ -127,6 +162,7 @@ def qwen_without_thinking(system, prompt):
 
 
 class Runtime:
+    private_requests = 0
     job: dict | None = None
     cancel = threading.Event()
     model = None
@@ -179,7 +215,10 @@ def start_job(kind, worker):
             else:
                 job_update(status="error", message=error_message(exc), progress=None)
         finally:
-            persist()
+            with LOCK:
+                persist()
+                if VAULT.closing and RT.private_requests == 0:
+                    finish_lock()
 
     threading.Thread(target=run, daemon=True, name=f"scribe-{kind}").start()
     return job
@@ -261,7 +300,24 @@ def ollama_status(force=False):
     return result
 
 
-app = FastAPI(title="Azimuth Scribe Local", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(_app):
+    async def monitor():
+        while True:
+            await asyncio.sleep(1)
+            with LOCK:
+                if VAULT.unlocked and not busy() and time.monotonic() - VAULT.last_activity >= IDLE_SECONDS:
+                    request_lock()
+    task = asyncio.create_task(monitor())
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        request_lock()
+
+
+app = FastAPI(title="Azimuth Scribe Local", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]"])
 
 
@@ -278,7 +334,28 @@ async def local_boundary(request: Request, call_next):
             return JSONResponse({"detail": "동일한 localhost 화면에서만 요청할 수 있습니다."}, 403)
         if request.headers.get("x-scribe-request") != "1":
             return JSONResponse({"detail": "로컬 앱 요청 헤더가 필요합니다."}, 403)
-    response = await call_next(request)
+    public = {"/api/health", "/api/vault/status", "/api/vault/setup", "/api/vault/unlock",
+              "/api/models/prepare", "/api/models/status"}
+    private = request.url.path.startswith("/api/") and request.url.path not in public
+    if private:
+        with LOCK:
+            if VAULT.unlocked and not busy() and time.monotonic() - VAULT.last_activity >= IDLE_SECONDS:
+                request_lock()
+            token = request.headers.get("authorization", "").removeprefix("Bearer ") or request.cookies.get(COOKIE)
+            if not VAULT.authorized(token):
+                return JSONResponse({"detail": "보관함 잠금을 해제하세요."}, 423 if not VAULT.unlocked else 401,
+                                    headers={"Cache-Control": "no-store"})
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                VAULT.touch()
+            RT.private_requests += 1
+    try:
+        response = await call_next(request)
+    finally:
+        if private:
+            with LOCK:
+                RT.private_requests -= 1
+                if VAULT.closing and RT.private_requests == 0 and not busy():
+                    finish_lock()
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cache-Control"] = "no-store"
@@ -289,6 +366,77 @@ async def local_boundary(request: Request, call_next):
 @app.get("/api/health")
 def health():
     return {"app": "azimuth-scribe-local", "root": str(ROOT)}
+
+
+@app.exception_handler(VaultError)
+async def vault_error(_request, error):
+    return JSONResponse({"detail": str(error)}, 400, headers={"Cache-Control": "no-store"})
+
+
+class VaultPassword(BaseModel):
+    password: str = Field(min_length=1, max_length=256, repr=False)
+
+
+@app.get("/api/vault/status")
+def vault_status(request: Request):
+    with LOCK:
+        if VAULT.unlocked and not busy() and time.monotonic() - VAULT.last_activity >= IDLE_SECONDS:
+            request_lock()
+        token = request.headers.get("authorization", "").removeprefix("Bearer ") or request.cookies.get(COOKIE)
+        return {**VAULT.status(), "locked": not VAULT.authorized(token)}
+
+
+def open_vault(password, creating=False):
+    with LOCK:
+        require_idle()
+        if VAULT.closing:
+            raise HTTPException(409, "현재 작업을 중단하고 잠그는 중입니다. 잠시 후 다시 시도하세요.")
+        was_unlocked = VAULT.unlocked
+        try:
+            if creating:
+                VAULT.setup(password)
+            else:
+                VAULT.unlock(password)
+            if not was_unlocked:
+                VAULT.migrate()
+                load_private()
+            session = VAULT.new_session()
+        except Exception:
+            if not was_unlocked:
+                finish_lock()
+            raise
+        response = JSONResponse({**VAULT.status(), "session": session})
+        response.set_cookie(COOKIE, session, httponly=True, samesite="strict", path="/")
+        return response
+
+
+@app.post("/api/vault/setup")
+def setup_vault(body: VaultPassword):
+    return open_vault(body.password, creating=True)
+
+
+@app.post("/api/vault/unlock")
+def unlock_vault(body: VaultPassword):
+    return open_vault(body.password)
+
+
+@app.post("/api/vault/lock")
+def lock_vault():
+    request_lock()
+    response = JSONResponse(VAULT.status())
+    response.delete_cookie(COOKIE)
+    return response
+
+
+@app.post("/api/vault/touch")
+def touch_vault():
+    return {"ok": True}
+
+
+@app.get("/api/models/status")
+def model_setup_status():
+    with LOCK:
+        return {"job": copy.deepcopy(RT.job) if RT.job and RT.job["type"] == "setup" else None}
 
 
 @app.get("/api/state")
@@ -386,13 +534,15 @@ def add_files(files: list[UploadFile] = File(...), recording: bool = Form(False)
                     path.unlink()
                     path = wav_path
                 name = Path(name).stem + ".wav"
+            duration = audio_duration(path)
+            VAULT.import_file(path)
         except Exception as exc:
             path.unlink(missing_ok=True)
             (RECORDINGS / f"{item_id}.wav").unlink(missing_ok=True)
             raise HTTPException(400, f"{name}: 읽을 수 없는 오디오입니다. {str(exc)[:160]}") from exc
         finally:
             upload.file.close()
-        item = {"id": item_id, "name": name, "stored_name": path.name, "duration": audio_duration(path),
+        item = {"id": item_id, "name": name, "stored_name": path.name, "duration": duration,
                 "status": "Pending", "selected": True, "error": None, "transcript": ""}
         with LOCK:
             STATE["files"].append(item)
@@ -445,7 +595,8 @@ def transcribe(file_id: str | None = None):
                 item.update(status="Processing", error=None)
             job_update(message=f"{item['name']} processing… ({index + 1}/{len(selected)})", progress=index / len(selected))
             try:
-                segments, info = model.transcribe(str(RECORDINGS / item["stored_name"]),
+                with VAULT.open(RECORDINGS / item["stored_name"]) as audio:
+                    segments, info = model.transcribe(audio,
                                                   language=None if CONFIG.language == "auto" else CONFIG.language,
                                                   beam_size=5, vad_filter=True, condition_on_previous_text=False)
                 parts = []
@@ -813,7 +964,7 @@ def export_result(body: ExportRequest):
         raise HTTPException(400, "저장할 내용이 없습니다.")
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
     filename = f"{stamp}_{'stt' if body.kind == 'transcript' else 'summary'}.{body.format}"
-    (RESULTS / filename).write_text(text, encoding="utf-8")
+    VAULT.write_bytes(RESULTS / filename, text.encode("utf-8"))
     return {"filename": filename, "url": f"/api/download/results/{filename}"}
 
 
@@ -822,19 +973,33 @@ def storage_files(kind: Literal["recordings", "results"]):
     folder = RECORDINGS if kind == "recordings" else RESULTS
     with LOCK:
         names = {f["stored_name"]: f["name"] for f in STATE["files"]}
-    return {"files": [{"filename": p.name, "name": names.get(p.name, p.name), "size": p.stat().st_size,
-                       "url": f"/api/download/{kind}/{p.name}"} for p in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True) if p.is_file()]}
+    return {"files": [{"filename": p.name[:-4], "name": names.get(p.name[:-4], p.name[:-4]), "size": p.stat().st_size,
+                       "url": f"/api/download/{kind}/{p.name[:-4]}"} for p in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                      if p.is_file() and p.name.endswith(".enc") and not p.name.startswith(".")]}
 
 
 @app.get("/api/download/{kind}/{filename}")
 def download(kind: Literal["recordings", "results"], filename: str):
     folder = RECORDINGS if kind == "recordings" else RESULTS
     path = (folder / filename).resolve()
-    if path.parent != folder or not path.is_file():
+    if path.parent != folder or not VAULT.encrypted(path).is_file():
         raise HTTPException(404, "파일을 찾을 수 없습니다.")
     with LOCK:
         display = next((f["name"] for f in STATE["files"] if f["stored_name"] == filename), filename)
-    return FileResponse(path, filename=display)
+    from urllib.parse import quote
+    import mimetypes
+    # The reader authenticates each block before releasing it; no plaintext temp file.
+    source = VAULT.open(path)
+    def content():
+        try:
+            for part in iter(lambda: source.read(BLOCK), b""):
+                if not VAULT.unlocked:
+                    break
+                yield part
+        finally:
+            source.close()
+    return StreamingResponse(content(), media_type=mimetypes.guess_type(display)[0] or "application/octet-stream",
+                             headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(display, safe="")})
 
 
 @app.get("/")

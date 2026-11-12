@@ -10,13 +10,15 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = Path.home() / "Library" / "Application Support" / "Azimuth Scribe Local"
 DEST = Path.home() / "Applications" / "Local LLM Encoder.app"
+LEGACY = DEST.with_name("Azimuth Scribe.app")
 BUILD = ROOT / "build" / "Local LLM Encoder.app"
 CONTENTS = BUILD / "Contents"
 MACOS = CONTENTS / "MacOS"
 RESOURCES = CONTENTS / "Resources"
-running = subprocess.run(["pgrep", "-fx", str(DEST / "Contents" / "MacOS" / "AzimuthScribe")], capture_output=True)
-if running.returncode == 0:
-    raise RuntimeError("메뉴에서 모두 종료를 누른 뒤 다시 설치하세요.")
+for app_path in (DEST, LEGACY):
+    running = subprocess.run(["pgrep", "-fx", str(app_path / "Contents" / "MacOS" / "AzimuthScribe")], capture_output=True)
+    if running.returncode == 0:
+        raise RuntimeError("메뉴에서 모두 종료를 누른 뒤 다시 설치하세요.")
 if (RUNTIME / "data" / "processes.json").exists():
     raise RuntimeError("설치된 서버를 먼저 중지한 뒤 다시 설치하세요.")
 MACOS.mkdir(parents=True, exist_ok=True)
@@ -27,7 +29,7 @@ if receipt_path.exists() and json.loads(receipt_path.read_text()).get("source_pa
     raise RuntimeError("다른 프로젝트의 설치가 있습니다. 기존 설치를 확인하세요.")
 if (ROOT / "data" / "processes.json").exists():
     raise RuntimeError("소스 폴더의 서버를 먼저 중지한 뒤 다시 설치하세요.")
-for name in ("bootstrap.py", "launcher.py", "server.py", "requirements.txt", "requirements-lock.txt"):
+for name in ("bootstrap.py", "launcher.py", "server.py", "vault.py", "requirements.txt", "requirements-lock.txt"):
     shutil.copy2(ROOT / name, RUNTIME / name)
 shutil.copytree(ROOT / "static", RUNTIME / "static", dirs_exist_ok=True)
 if not (RUNTIME / ".venv").exists() and (ROOT / ".venv").exists():
@@ -44,7 +46,7 @@ info = {
     "CFBundleName": "Local LLM Encoder", "CFBundleDisplayName": "Local LLM Encoder",
     "CFBundleIdentifier": "net.realmi.azimuth-scribe.local",
     "CFBundleExecutable": "AzimuthScribe", "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.0.0", "CFBundleVersion": "1",
+    "CFBundleShortVersionString": "1.1.0", "CFBundleVersion": "2",
     "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True,
     "NSMicrophoneUsageDescription": "메뉴 막대에서 시작한 녹음을 받아쓰려면 마이크 접근이 필요합니다.",
     "NSPrincipalClass": "NSApplication", "LSMultipleInstancesProhibited": True,
@@ -53,7 +55,7 @@ info = {
 }
 (CONTENTS / "Info.plist").write_bytes(plistlib.dumps(info))
 subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-O", "-framework", "AppKit",
-                "-target", "arm64-apple-macos14.0", str(ROOT / "menubar" / "main.swift"), str(ROOT / "menubar" / "Panel.swift"), str(ROOT / "menubar" / "Workspace.swift"),
+                "-target", "arm64-apple-macos14.0", str(ROOT / "menubar" / "main.swift"), str(ROOT / "menubar" / "Panel.swift"), str(ROOT / "menubar" / "Workspace.swift"), str(ROOT / "menubar" / "VaultKeychain.swift"),
                 "-o", str(MACOS / "AzimuthScribe")], check=True)
 subprocess.run(["xcrun", "swift", str(ROOT / "menubar" / "icon.swift"), str(RESOURCES / "AppIcon.icns")], check=True)
 subprocess.run(["codesign", "--force", "--sign", "-", str(BUILD)], check=True)
@@ -74,6 +76,17 @@ with tempfile.TemporaryDirectory(prefix=".azimuth-install-", dir=DEST.parent) as
         if previous.exists():
             previous.rename(DEST)
         raise
+    # Existing Dock/Finder shortcuts keep opening the updated controller.
+    if LEGACY.exists() and not LEGACY.is_symlink():
+        legacy_info = LEGACY / "Contents" / "Info.plist"
+        if legacy_info.is_file() and plistlib.loads(legacy_info.read_bytes()).get("CFBundleIdentifier") == info["CFBundleIdentifier"]:
+            previous_legacy = Path(staging) / "legacy.app"
+            LEGACY.rename(previous_legacy)
+            try:
+                LEGACY.symlink_to(DEST, target_is_directory=True)
+            except Exception:
+                previous_legacy.rename(LEGACY)
+                raise
 (ROOT / ".local-install.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
 print(f"Installed: {DEST}")
 print(f"Runtime: {RUNTIME}")

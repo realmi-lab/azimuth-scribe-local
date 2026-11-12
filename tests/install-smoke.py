@@ -15,6 +15,7 @@ import sys
 import tempfile
 from unittest.mock import patch
 import urllib.request
+from http.cookiejar import CookieJar
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -37,7 +38,7 @@ def main():
         source, home = temp / "source", temp / "home"
         source.mkdir()
         home.mkdir()
-        for name in ("bootstrap.py", "launcher.py", "server.py", "requirements.txt", "requirements-lock.txt"):
+        for name in ("bootstrap.py", "launcher.py", "server.py", "vault.py", "requirements.txt", "requirements-lock.txt"):
             shutil.copy2(ROOT / name, source / name)
         for folder in ("menubar", "static"):
             shutil.copytree(ROOT / folder, source / folder, ignore=shutil.ignore_patterns("__pycache__"))
@@ -74,7 +75,13 @@ def main():
             prepared = subprocess.run(command + ["--download-models"], env=env, capture_output=True, text=True, timeout=180)
             print(prepared.stdout, end="", flush=True)
             assert prepared.returncode == 0, prepared.stderr
-            with urllib.request.urlopen("http://127.0.0.1:18767/api/state", timeout=2) as response:
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+            setup = urllib.request.Request("http://127.0.0.1:18767/api/vault/setup", method="POST",
+                                           data=json.dumps({"password": "test-only-install-password"}).encode(),
+                                           headers={"Content-Type": "application/json", "X-Scribe-Request": "1"})
+            with opener.open(setup, timeout=10):
+                pass
+            with opener.open("http://127.0.0.1:18767/api/state", timeout=2) as response:
                 state = json.load(response)
             assert state["runtime"]["job"]["status"] == "completed"
             assert state["runtime"]["stt"]["state"] == "ready"
@@ -87,7 +94,7 @@ def main():
             request = urllib.request.Request("http://127.0.0.1:18767/api/settings", method="PUT",
                                              data=json.dumps(settings).encode(),
                                              headers={"Content-Type": "application/json", "X-Scribe-Request": "1"})
-            with urllib.request.urlopen(request, timeout=2):
+            with opener.open(request, timeout=2):
                 pass
             rejected = subprocess.run(command + ["--download-models"], env=env, capture_output=True, text=True, timeout=10)
             assert rejected.returncode != 0, "A rejected model setup must not report success."

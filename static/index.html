@@ -8,11 +8,26 @@
   <title>Local LLM Encoder</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/vault.css">
+  <script src="/static/vault.js" defer></script>
   <script src="/static/app.js" defer></script>
   <link rel="stylesheet" href="/static/panel.css">
   <script src="/static/panel.js" defer></script>
 </head>
-<body>
+<body class="vault-locked">
+<section id="vault-gate" class="vault-gate" aria-label="암호화 보관함">
+  <form id="vault-form" class="vault-card">
+    <h1 id="vault-title">암호화 보관함</h1>
+    <p id="vault-note">보관함 상태를 확인하고 있습니다.</p>
+    <label>보관함 비밀번호<input id="vault-password" type="password" required maxlength="256" autocomplete="current-password"></label>
+    <label id="vault-confirm-label" hidden>비밀번호 확인<input id="vault-confirm" type="password" maxlength="256" autocomplete="new-password"></label>
+    <label id="vault-remember-label" class="vault-remember" hidden><input id="vault-remember" type="checkbox" checked>Mac 키체인에 보관하고 본인 인증으로 열기</label>
+    <p id="vault-error" class="vault-error" role="alert"></p>
+    <button id="vault-submit" class="button primary" type="submit">잠금 해제</button>
+    <button id="vault-native" class="button" type="button" hidden>Touch ID / Mac 암호로 열기</button>
+  </form>
+</section>
+<button id="vault-lock" class="button" type="button" hidden>보관함 잠그기</button>
 <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
   <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></symbol>
   <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4M12 14v3"/></symbol>
@@ -91,7 +106,7 @@
 
 <dialog id="prompts-dialog"><form id="prompts-form"><div class="dialog-heading"><div><h2>요약 서식 편집</h2><p>원하는 항목에 맞춰 요약 지시문을 작성하세요.</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><label class="form-label">서식<select id="edit-prompt-select"></select></label><label class="form-label">지시문<textarea id="prompt-editor" rows="10" required></textarea></label><p class="field-note">모든 서식에 원문에 있는 정보만 사용하고 추측·진단을 추가하지 않는 공통 규칙이 적용됩니다.</p><div class="new-prompt"><input id="new-prompt-name" aria-label="새 서식 이름" placeholder="새 서식 이름" maxlength="60"><button type="button" class="button" id="add-prompt">추가</button><button type="button" class="button" id="remove-prompt">선택 서식 삭제</button></div></div><div class="dialog-footer"><button type="button" class="button" data-close>취소</button><button type="submit" class="button primary">서식 저장</button></div></form></dialog>
 
-<dialog id="save-dialog" class="small-dialog"><form id="save-form"><div class="dialog-heading"><h2 id="save-title">결과 저장</h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><label class="form-label">파일 형식<select id="save-format"><option value="txt">텍스트 (.txt)</option><option value="md">Markdown (.md)</option></select></label><p class="field-note">Results 폴더에 저장하고 파일을 다운로드합니다.</p></div><div class="dialog-footer"><button type="button" class="button" data-close>취소</button><button type="submit" class="button primary">저장</button></div></form></dialog>
+<dialog id="save-dialog" class="small-dialog"><form id="save-form"><div class="dialog-heading"><h2 id="save-title">결과 저장</h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><label class="form-label">파일 형식<select id="save-format"><option value="txt">텍스트 (.txt)</option><option value="md">Markdown (.md)</option></select></label><label class="checkbox-label"><input id="save-plain" type="checkbox">일반 파일도 내보내기 (암호화 해제본)</label><p class="field-note">Results 폴더에는 암호화해 보관합니다. 일반 파일은 선택한 경우에만 내보냅니다.</p></div><div class="dialog-footer"><button type="button" class="button" data-close>취소</button><button type="submit" class="button primary">저장</button></div></form></dialog>
 
 <dialog id="storage-dialog"><div class="dialog-heading"><div><h2 id="storage-title">Results</h2><p>이 컴퓨터에 저장된 파일</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body storage-list" id="storage-list"></div><div class="dialog-footer"><button class="button" data-close>닫기</button></div></dialog>
 

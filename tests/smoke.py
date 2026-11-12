@@ -3,6 +3,7 @@
 Run: .venv/bin/python tests/smoke.py
 Requires macOS 'say', the prepared Whisper small model and local qwen3:4b-instruct.
 """
+import io
 import json
 import os
 from pathlib import Path
@@ -80,6 +81,7 @@ def main():
 
         try:
             wait_ready()
+            request("POST", "/api/vault/setup", json={"password": "test-only-model-smoke-password"})
             assert request("GET", "/api/state")["files"] == []
             page = client.get("/")
             assert page.status_code == 200 and "STEP 4 : Local LLM Summary" in page.text
@@ -93,7 +95,7 @@ def main():
                     result = request("POST", "/api/files", files={"files": (browser_input.name, source, "application/octet-stream")}, data={"recording": "true"})
                 items.append(result["files"][0])
             first, second = items
-            with av.open(str(folder / "Recordings" / first["stored_name"])) as container:
+            with av.open(io.BytesIO(client.get(f"/api/download/recordings/{first['stored_name']}").content)) as container:
                 assert container.streams.audio[0].codec_context.sample_rate == 16000
                 assert container.streams.audio[0].codec_context.layout.nb_channels == 1
             assert first["duration"] > 0 and first["name"].endswith(".wav")
@@ -132,10 +134,12 @@ def main():
             for fmt in ("txt", "md"):
                 output = request("POST", "/api/export", json={"kind": "summary", "format": fmt})
                 assert client.get(output["url"]).text == summary
-                assert (folder / "Results" / output["filename"]).read_text() == summary
+                assert (folder / "Results" / (output["filename"] + ".enc")).is_file()
+                assert client.get(output["url"]).text == summary
             print("PASS: real Qwen summary, edited transcript, TXT/Markdown exports", flush=True)
             print("SUMMARY:", summary[:350], flush=True)
 
+            request("PATCH", "/api/text", json={"summary": ""})
             request("POST", "/api/summary", json={"prompt": "일반 요약"})
             for _ in range(240):
                 state = request("GET", "/api/state")
@@ -159,6 +163,8 @@ def main():
             process.terminate(); process.wait(timeout=10)
             process = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, stdout=log, stderr=log)
             wait_ready()
+            assert client.get("/api/state").status_code == 423
+            request("POST", "/api/vault/unlock", json={"password": "test-only-model-smoke-password"})
             after = request("GET", "/api/state")
             assert after["transcript"] == before["transcript"] and after["summary"] == before["summary"]
             assert after["prompts"] == prompts and after["settings"]["temperature"] == 0.1
