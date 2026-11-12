@@ -7,6 +7,7 @@
 - **[설치 파일·릴리스](https://github.com/realmi-lab/azimuth-scribe-local/releases/latest)**
 - **[소스 ZIP 바로 다운로드](https://github.com/realmi-lab/azimuth-scribe-local/archive/refs/heads/main.zip)**
 - **[모델·의존성 다운로드 링크 모음](docs/downloads.md)**
+- **[로컬 LLM(요약 모델) 다운로드](#로컬-llm-다운로드)**
 
 자동 설치 대상은 **macOS 14 이상 / Apple Silicon(M1 이후)**입니다. Windows용 설치 파일은 포함하지 않습니다. Ollama의 macOS 요구 사항은 [공식 문서](https://docs.ollama.com/macos)를 따릅니다.
 
@@ -26,17 +27,54 @@ zsh setup.command
 
 모델 준비가 끝나야 설치가 성공으로 표시됩니다. 실패하면 터미널의 오류와 `data/server.log`를 확인하세요. 설치 중 시작한 서버는 계속 실행되며 `stop.command`로 중지할 수 있습니다.
 
+## 로컬 LLM 다운로드
+
+요약에 쓰는 로컬 LLM과 음성 인식 모델은 용량이 커서(약 3GB) Git 저장소에 넣지 않습니다. GitHub는 파일당 100MB(LFS도 2GB)까지만 올릴 수 있기 때문입니다. 아래 **공식 배포처**에서 받습니다. `setup.command`를 실행하면 자동으로 받으므로 보통은 따로 받을 필요가 없습니다.
+
+### 1. Ollama 설치
+
+로컬 LLM을 실행하는 프로그램입니다. 없으면 `setup.command`가 공식 CLI를 앱 전용 폴더에 자동 설치합니다.
+
+- 다운로드: **https://ollama.com/download**
+
+### 2. 요약 모델 받기 (Qwen3)
+
+| 모델 | 크기 | 용도 | 공식 페이지 | 받는 명령 |
+| --- | --- | --- | --- | --- |
+| **Qwen3 4B Instruct** (기본) | 약 2.5GB | 한국어 요약 · 권장 | https://ollama.com/library/qwen3:4b-instruct | `ollama pull qwen3:4b-instruct` |
+| Qwen3 1.7B | 약 1.4GB | 가볍고 빠름 · 메모리 8GB Mac | https://ollama.com/library/qwen3:1.7b | `ollama pull qwen3:1.7b` |
+| Qwen3 8B | 약 5.2GB | 더 정확함 · 메모리 16GB 이상 권장 | https://ollama.com/library/qwen3:8b | `ollama pull qwen3:8b` |
+
+- 원본 모델(Hugging Face): https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507 · 라이선스 Apache-2.0
+- 저장 위치: `~/.ollama/models/`
+
+### 3. 음성 인식 모델 받기 (Whisper)
+
+| 모델 | 크기 | 공식 페이지 | 파일 직접 다운로드 |
+| --- | --- | --- | --- |
+| **faster-whisper small** (기본) | 약 484MB | https://huggingface.co/Systran/faster-whisper-small | https://huggingface.co/Systran/faster-whisper-small/resolve/main/model.bin |
+
+- 저장 위치: `~/Library/Application Support/Azimuth Scribe Local/data/models/faster-whisper-small/`
+
+### 한 번에 받기
+
+```sh
+zsh download-models.command
+```
+
+앱 안에서는 `⋯` → **설정…** → **모델 및 음성 인식 설정** → **모델 준비 / 다시 불러오기**를 누르면 됩니다. 인터넷은 처음 모델을 받을 때만 필요하고, 그 뒤 녹음·받아쓰기·요약은 모두 이 Mac 안에서 처리합니다.
+
 ## 실행
 
 처음 설치 후에는 모델을 다시 내려받지 않고 로컬 파일을 사용합니다.
 
 1. Dock의 **Local LLM Encoder** 또는 `~/Applications/Local LLM Encoder.app`을 엽니다.
-2. 상단 마이크 아이콘 또는 Dock 아이콘의 우클릭 메뉴로 제어합니다.
-3. **프로그램 열기**를 누르면 필요한 경우 서버를 시작하고 **http://localhost:18765** 를 엽니다.
+2. 메뉴 막대의 마이크 아이콘을 누르면 아이콘 아래에 작업 패널이 열립니다. 위쪽에서 녹음하고, 왼쪽에서 녹음 파일·받아쓰기, 오른쪽에서 요약을 다룹니다.
+3. 받아쓰기·요약의 잘못 인식된 말은 **일괄 수정**으로 한 번에 고칠 수 있습니다. 긴 회의는 자동으로 구간을 나눠 요약합니다.
 
 메뉴에서 환경설정, 서버 시작·중지·재시작, 현재 작업 중단, 녹음·결과 폴더 열기, 로그 보기를 사용할 수 있습니다. 작업 중에는 서버 중지·재시작·모두 종료가 비활성화되므로 먼저 **현재 작업 중단**을 누르세요. **컨트롤러만 종료**는 서버를 유지하고, **모두 종료**는 이 프로젝트가 시작한 서버와 Ollama를 함께 종료합니다. 기존에 실행 중이던 Ollama는 종료하지 않습니다.
 
-컨트롤러 창을 닫아도 메뉴 막대 아이콘은 유지됩니다. Dock 아이콘을 클릭하면 제어 창이 다시 열립니다. 자동 로그인 실행은 설정하지 않습니다.
+패널 창을 닫아도 메뉴 막대 아이콘은 유지됩니다. 아이콘이나 Dock 아이콘을 누르면 패널이 다시 열립니다. 브라우저에서 **http://localhost:18765** 로 열 수도 있습니다. 자동 로그인 실행은 설정하지 않습니다.
 
 `start.command`는 서버와 메뉴 컨트롤러를 실행하며, `stop.command`는 서버를 중지합니다. 메뉴 컨트롤러를 다시 빌드·설치하려면 메뉴에서 **모두 종료**를 누른 뒤 `install-menubar.command`를 실행합니다. 빌드에는 Apple Command Line Tools가 필요합니다. 실행 코드와 데이터는 `~/Library/Application Support/Azimuth Scribe Local/`에 설치되므로 앱 실행에 문서 폴더 접근 권한은 필요하지 않습니다. 다시 설치해도 기존 설치의 데이터는 유지합니다.
 
