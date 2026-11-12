@@ -29,7 +29,7 @@ if receipt_path.exists() and json.loads(receipt_path.read_text()).get("source_pa
     raise RuntimeError("다른 프로젝트의 설치가 있습니다. 기존 설치를 확인하세요.")
 if (ROOT / "data" / "processes.json").exists():
     raise RuntimeError("소스 폴더의 서버를 먼저 중지한 뒤 다시 설치하세요.")
-for name in ("bootstrap.py", "launcher.py", "server.py", "vault.py", "requirements.txt", "requirements-lock.txt"):
+for name in ("bootstrap.py", "launcher.py", "server.py", "vault.py", "native_auth.py", "requirements.txt", "requirements-lock.txt"):
     shutil.copy2(ROOT / name, RUNTIME / name)
 shutil.copytree(ROOT / "static", RUNTIME / "static", dirs_exist_ok=True)
 if not (RUNTIME / ".venv").exists() and (ROOT / ".venv").exists():
@@ -46,7 +46,8 @@ info = {
     "CFBundleName": "Local LLM Encoder", "CFBundleDisplayName": "Local LLM Encoder",
     "CFBundleIdentifier": "net.realmi.azimuth-scribe.local",
     "CFBundleExecutable": "AzimuthScribe", "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.2.0", "CFBundleVersion": "4",
+    "CFBundleShortVersionString": "1.3.0", "CFBundleVersion": "5",
+    "CFBundleURLTypes": [{"CFBundleURLName": "Local LLM Encoder", "CFBundleURLSchemes": ["localllmencoder"]}],
     "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True,
     "NSMicrophoneUsageDescription": "메뉴 막대에서 시작한 녹음을 받아쓰려면 마이크 접근이 필요합니다.",
     "NSPrincipalClass": "NSApplication", "LSMultipleInstancesProhibited": True,

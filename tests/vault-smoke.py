@@ -1,21 +1,25 @@
 """Focused vault contracts, using disposable data and no Keychain prompts/models."""
 import asyncio
+import base64
 import io
 import json
 import os
+import socket
 from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 import wave
 
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vault import Vault, VaultError, BLOCK, HEADER, IDLE_SECONDS
+from vault import Vault, VaultError, BLOCK, HEADER, IDLE_SECONDS, COOKIE
 
 PASSWORD = "test1234"  # Exactly eight characters; disposable test vaults only.
+NATIVE_SECRET = base64.b64encode(b"T" * 32).decode()
 SECRET = "개인 회의 기록: 금요일 오전 열 시에 제품 발표"
 
 
@@ -30,6 +34,32 @@ def wave_data():
 
 
 class FileContracts(unittest.TestCase):
+    def test_mac_auth_migration_preserves_files_and_revokes_old_password(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vault = Vault(root)
+            vault.setup(PASSWORD)
+            identity = vault.meta["id"]
+            vault.write_bytes(root / "note.txt", SECRET.encode())
+            original = (root / "note.txt.enc").read_bytes()
+            old_token = vault.new_session()
+            original_meta = vault.meta_path.read_bytes()
+            with patch.object(vault, "_atomic", side_effect=OSError("test write failure")):
+                with self.assertRaises(OSError):
+                    vault.adopt_native(PASSWORD, NATIVE_SECRET)
+            self.assertEqual(vault.meta_path.read_bytes(), original_meta)
+            vault.adopt_native(PASSWORD, NATIVE_SECRET)
+            self.assertEqual(vault.meta["id"], identity)
+            self.assertEqual(vault.status()["auth_mode"], "macos")
+            self.assertFalse(vault.authorized(old_token))
+            self.assertEqual((root / "note.txt.enc").read_bytes(), original)
+            vault.lock()
+            with self.assertRaises(VaultError):
+                vault.unlock(PASSWORD)
+            reopened = Vault(root)
+            reopened.unlock(NATIVE_SECRET)
+            self.assertEqual(reopened.read_bytes(root / "note.txt"), SECRET.encode())
+
     def test_eight_character_password_minimum(self):
         with tempfile.TemporaryDirectory() as directory:
             vault = Vault(Path(directory))
@@ -149,11 +179,21 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
             async with s.app.router.lifespan_context(s.app), httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:18765", headers=headers) as client:
                 async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:18765", headers=headers) as anonymous:
                     self.assertEqual((await client.get("/api/state")).status_code, 423)
-                    self.assertEqual((await client.post("/api/vault/setup", json={"password": "seven77"})).status_code, 400)
-                    setup = await client.post("/api/vault/setup", json={"password": PASSWORD})
-                    self.assertEqual(setup.status_code, 200, setup.text)
-                    self.assertIn("HttpOnly", setup.headers["set-cookie"])
-                    old_token = setup.json()["session"]
+                    for endpoint in ("setup", "unlock"):
+                        self.assertEqual((await client.post("/api/vault/" + endpoint, json={"password": PASSWORD})).status_code, 410)
+                    def untrusted_peer():
+                        with socket.socket(socket.AF_UNIX) as channel:
+                            channel.connect(str(root / ".native-auth.sock"))
+                            with channel.makefile("rb") as response:
+                                return json.loads(response.readline())
+                    self.assertFalse((await asyncio.to_thread(untrusted_peer))["ok"])
+                    # Simulate a verified controller callback; HTTP never accepts a credential.
+                    legacy_id = s.VAULT.setup(PASSWORD) or s.VAULT.meta["id"]
+                    s.VAULT.lock()
+                    setup = s.open_native_vault({"action": "migrate", "id": legacy_id, "legacy_secret": PASSWORD, "secret": NATIVE_SECRET})
+                    self.assertEqual(setup["auth_mode"], "macos")
+                    old_token = setup["session"]
+                    client.cookies.set(COOKIE, old_token)
                     self.assertFalse((root / "workspace.json").exists())
                     self.assertFalse((root / "Recordings/legacy.wav").exists())
                     self.assertEqual((root / "pending-recording.m4a").read_bytes(), b"excluded-recording-temp")
@@ -221,9 +261,9 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(s.VAULT._key)
                     self.assertEqual(s.STATE["transcript"], "")
                     self.assertEqual((await client.get("/api/state")).status_code, 423)
-                    self.assertEqual((await client.post("/api/vault/unlock", json={"password": "wrong"})).status_code, 400)
-                    unlock = await client.post("/api/vault/unlock", json={"password": PASSWORD})
-                    self.assertEqual(unlock.status_code, 200, unlock.text)
+                    self.assertEqual((await client.post("/api/vault/unlock", json={"password": NATIVE_SECRET})).status_code, 410)
+                    unlock = s.open_native_vault({"action": "unlock", "id": legacy_id, "secret": NATIVE_SECRET})
+                    client.cookies.set(COOKIE, unlock["session"])
                     self.assertEqual((await client.get("/api/state")).json()["summary"], SECRET)
                     self.assertEqual((await anonymous.get("/api/state", headers={"Authorization": "Bearer " + old_token})).status_code, 401)
                     # Verify idle locking independently of any status/HTTP polling.
@@ -231,7 +271,7 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(1.2)
                     self.assertIsNone(s.VAULT._key)
                     self.assertEqual((await client.get(exported["url"])).status_code, 423)
-                    self.assertEqual((await client.post("/api/vault/unlock", json={"password": PASSWORD})).status_code, 200)
+                    client.cookies.set(COOKIE, s.open_native_vault({"action": "unlock", "id": legacy_id, "secret": NATIVE_SECRET})["session"])
                     # Locking cancels a running private worker before its key is cleared.
                     def worker():
                         s.RT.cancel.wait(3)

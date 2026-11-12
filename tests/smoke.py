@@ -52,8 +52,14 @@ def main():
         browser_audio(audio, browser_inputs[1], "aac")
         env = {**os.environ, "SCRIBE_DATA_DIR": str(folder), "SCRIBE_PORT": "8766"}
         log = (folder / "server.log").open("w")
-        process = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, stdout=log, stderr=log)
+        server_command = [sys.executable, str(ROOT / "tests/native-fixture.py"), "serve"]
+        process = subprocess.Popen(server_command, env=env, stdout=log, stderr=log)
         client = httpx.Client(base_url=URL, headers=HEADERS, trust_env=False, timeout=15)
+
+        def authenticate_fixture():
+            result = subprocess.run([sys.executable, str(ROOT / "tests/native-fixture.py"), "unlock"],
+                                    env=env, capture_output=True, text=True, check=True)
+            client.cookies.set("scribe_vault", json.loads(result.stdout)["session"])
 
         def request(method, path, **kwargs):
             response = client.request(method, path, **kwargs)
@@ -81,10 +87,10 @@ def main():
 
         try:
             wait_ready()
-            request("POST", "/api/vault/setup", json={"password": "test-only-model-smoke-password"})
+            authenticate_fixture()
             assert request("GET", "/api/state")["files"] == []
             page = client.get("/")
-            assert page.status_code == 200 and "STEP 4 : Local LLM Summary" in page.text
+            assert page.status_code == 200 and 'id="history-view"' in page.text
             assert "connect-src 'self'" in page.headers["content-security-policy"]
             assert client.patch("/api/text", json={"transcript": "x"}, headers={"Origin": "https://example.com"}).status_code == 403
             print("PASS: localhost boundary and application assets", flush=True)
@@ -161,10 +167,10 @@ def main():
             assert client.get(f"/api/download/recordings/{second['stored_name']}").status_code == 200
             before = request("GET", "/api/state")
             process.terminate(); process.wait(timeout=10)
-            process = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, stdout=log, stderr=log)
+            process = subprocess.Popen(server_command, env=env, stdout=log, stderr=log)
             wait_ready()
             assert client.get("/api/state").status_code == 423
-            request("POST", "/api/vault/unlock", json={"password": "test-only-model-smoke-password"})
+            authenticate_fixture()
             after = request("GET", "/api/state")
             assert after["transcript"] == before["transcript"] and after["summary"] == before["summary"]
             assert after["prompts"] == prompts and after["settings"]["temperature"] == 0.1

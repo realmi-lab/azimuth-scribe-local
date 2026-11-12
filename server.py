@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from vault import Vault, VaultError, COOKIE, IDLE_SECONDS, BLOCK
+from native_auth import NativeAuthServer
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("SCRIBE_DATA_DIR", str(ROOT / "data"))).resolve()
@@ -308,6 +309,7 @@ async def lifespan(_app):
             with LOCK:
                 if VAULT.unlocked and not busy() and time.monotonic() - VAULT.last_activity >= IDLE_SECONDS:
                     request_lock()
+    native_channel.start()
     task = asyncio.create_task(monitor())
     try:
         yield
@@ -315,6 +317,7 @@ async def lifespan(_app):
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         request_lock()
+        native_channel.stop()
 
 
 app = FastAPI(title="Azimuth Scribe Local", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -373,10 +376,6 @@ async def vault_error(_request, error):
     return JSONResponse({"detail": str(error)}, 400, headers={"Cache-Control": "no-store"})
 
 
-class VaultPassword(BaseModel):
-    password: str = Field(min_length=1, max_length=256, repr=False)
-
-
 @app.get("/api/vault/status")
 def vault_status(request: Request):
     with LOCK:
@@ -386,17 +385,33 @@ def vault_status(request: Request):
         return {**VAULT.status(), "locked": not VAULT.authorized(token)}
 
 
-def open_vault(password, creating=False):
+def open_native_vault(body):
     with LOCK:
+        if body.get("action") == "lock":
+            request_lock()
+            return VAULT.status()
         require_idle()
         if VAULT.closing:
-            raise HTTPException(409, "현재 작업을 중단하고 잠그는 중입니다. 잠시 후 다시 시도하세요.")
+            raise VaultError("현재 작업을 마무리하고 잠그는 중입니다. 잠시 후 다시 시도하세요.")
+        action, secret, identity = body.get("action"), body.get("secret"), body.get("id")
+        VAULT._native_secret(secret)
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity):
+            raise VaultError("보관함 식별자가 올바르지 않습니다.")
+        if VAULT.meta and identity != VAULT.meta["id"]:
+            raise VaultError("다른 보관함의 인증 요청입니다.")
         was_unlocked = VAULT.unlocked
         try:
-            if creating:
-                VAULT.setup(password)
+            if action == "initialize" and not VAULT.meta:
+                VAULT.setup(secret, identity=identity, native=True)
+            elif action == "migrate" and VAULT.meta and VAULT.meta.get("auth_mode") != "macos":
+                legacy = body.get("legacy_secret")
+                if not isinstance(legacy, str) or not 1 <= len(legacy) <= 256:
+                    raise VaultError("기존 키체인 연결을 확인하세요.")
+                VAULT.adopt_native(legacy, secret)
+            elif action == "unlock" and VAULT.meta and VAULT.meta.get("auth_mode") == "macos":
+                VAULT.unlock(secret)
             else:
-                VAULT.unlock(password)
+                raise VaultError("Mac 앱에서 보관함 상태를 새로 확인한 뒤 인증하세요.")
             if not was_unlocked:
                 VAULT.migrate()
                 load_private()
@@ -405,19 +420,16 @@ def open_vault(password, creating=False):
             if not was_unlocked:
                 finish_lock()
             raise
-        response = JSONResponse({**VAULT.status(), "session": session})
-        response.set_cookie(COOKIE, session, httponly=True, samesite="strict", path="/")
-        return response
+        return {**VAULT.status(), "session": session}
+
+
+native_channel = NativeAuthServer(DATA, open_native_vault)
 
 
 @app.post("/api/vault/setup")
-def setup_vault(body: VaultPassword):
-    return open_vault(body.password, creating=True)
-
-
 @app.post("/api/vault/unlock")
-def unlock_vault(body: VaultPassword):
-    return open_vault(body.password)
+def password_login_disabled():
+    return JSONResponse({"detail": "별도 비밀번호 로그인은 사용할 수 없습니다. Mac 앱에서 Touch ID 또는 Mac 로그인 암호로 인증하세요."}, 410)
 
 
 @app.post("/api/vault/lock")
@@ -1040,12 +1052,13 @@ def download(kind: Literal["recordings", "results"], filename: str, request: Req
         headers["Content-Range"] = f"bytes {start}-{end}/{total}"
     headers["Content-Length"] = str(max(0, end - start + 1))
     source.seek(start)
+    token = request.headers.get("authorization", "").removeprefix("Bearer ") or request.cookies.get(COOKIE)
     def content():
         try:
             remaining = max(0, end - start + 1)
-            while remaining and VAULT.unlocked:
+            while remaining and VAULT.authorized(token):
                 part = source.read(min(BLOCK, remaining))
-                if not part or not VAULT.unlocked:
+                if not part or not VAULT.authorized(token):
                     break
                 remaining -= len(part)
                 yield part

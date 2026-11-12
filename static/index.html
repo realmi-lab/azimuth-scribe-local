@@ -17,16 +17,16 @@
 </head>
 <body class="vault-locked history-app">
 <section id="vault-gate" class="vault-gate" aria-label="암호화 보관함">
-  <form id="vault-form" class="vault-card">
+  <div class="vault-card">
+    <span class="vault-symbol" aria-hidden="true"><svg class="icon"><use href="#i-lock"/></svg></span>
     <h1 id="vault-title">암호화 보관함</h1>
     <p id="vault-note">보관함 상태를 확인하고 있습니다.</p>
-    <label>보관함 비밀번호<input id="vault-password" type="password" required maxlength="256" autocomplete="current-password"></label>
-    <label id="vault-confirm-label" hidden>비밀번호 확인<input id="vault-confirm" type="password" maxlength="256" autocomplete="new-password"></label>
-    <label id="vault-remember-label" class="vault-remember" hidden><input id="vault-remember" type="checkbox" checked>Mac 키체인에 보관하고 본인 인증으로 열기</label>
     <p id="vault-error" class="vault-error" role="alert"></p>
-    <button id="vault-submit" class="button primary" type="submit">잠금 해제</button>
-    <button id="vault-native" class="button" type="button" hidden>Touch ID / Mac 암호로 열기</button>
-  </form>
+    <button id="vault-touchid" class="button primary" type="button" hidden>Touch ID로 열기</button>
+    <button id="vault-mac-password" class="button" type="button" hidden>Mac 로그인 암호로 열기</button>
+    <a id="vault-open-app" class="button primary" href="localllmencoder://open" hidden>Mac 앱에서 인증하기</a>
+    <p class="vault-auth-note" id="vault-auth-note">Mac 로그인 암호는 macOS 인증 창에서만 입력합니다.</p>
+  </div>
 </section>
 <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
   <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></symbol>

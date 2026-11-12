@@ -15,7 +15,7 @@ import sys
 import tempfile
 from unittest.mock import patch
 import urllib.request
-from http.cookiejar import CookieJar
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -33,12 +33,13 @@ def main():
     with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as response:
         available = json.load(response)
     assert any(item["name"] == "qwen3:4b-instruct" for item in available["models"]), "Prepare Qwen first."
-    with tempfile.TemporaryDirectory(prefix="scribe-install-") as temp:
+    # Keep the macOS Unix-domain authentication socket below its 104-byte limit.
+    with tempfile.TemporaryDirectory(prefix="scribe-i-", dir="/tmp") as temp:
         temp = Path(temp)
-        source, home = temp / "source", temp / "home"
+        source, home = temp / "source", temp / "h"
         source.mkdir()
         home.mkdir()
-        for name in ("bootstrap.py", "launcher.py", "server.py", "vault.py", "requirements.txt", "requirements-lock.txt"):
+        for name in ("bootstrap.py", "launcher.py", "server.py", "vault.py", "native_auth.py", "requirements.txt", "requirements-lock.txt"):
             shutil.copy2(ROOT / name, source / name)
         for folder in ("menubar", "static"):
             shutil.copytree(ROOT / folder, source / folder, ignore=shutil.ignore_patterns("__pycache__"))
@@ -75,27 +76,33 @@ def main():
             prepared = subprocess.run(command + ["--download-models"], env=env, capture_output=True, text=True, timeout=180)
             print(prepared.stdout, end="", flush=True)
             assert prepared.returncode == 0, prepared.stderr
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             setup = urllib.request.Request("http://127.0.0.1:18767/api/vault/setup", method="POST",
                                            data=json.dumps({"password": "test-only-install-password"}).encode(),
                                            headers={"Content-Type": "application/json", "X-Scribe-Request": "1"})
-            with opener.open(setup, timeout=10):
-                pass
-            with opener.open("http://127.0.0.1:18767/api/state", timeout=2) as response:
-                state = json.load(response)
-            assert state["runtime"]["job"]["status"] == "completed"
-            assert state["runtime"]["stt"]["state"] == "ready"
-            assert state["files"] == [] and state["transcript"] == "" and state["summary"] == ""
+            try:
+                opener.open(setup, timeout=10)
+                raise AssertionError("HTTP password login must be disabled")
+            except urllib.error.HTTPError as error:
+                assert error.code == 410
+            try:
+                opener.open("http://127.0.0.1:18767/api/state", timeout=2)
+                raise AssertionError("Private state must require Mac authentication")
+            except urllib.error.HTTPError as error:
+                assert error.code == 423
+            with opener.open("http://127.0.0.1:18767/api/models/status", timeout=2) as response:
+                assert json.load(response)["job"]["status"] == "completed"
+            with opener.open("http://127.0.0.1:18767/api/vault/status", timeout=2) as response:
+                assert json.load(response)["initialized"] is False
             processes = json.loads((runtime / "data" / "processes.json").read_text())
             assert "ollama" not in processes, "Existing shared Ollama must not become owned."
             print("PASS: source launcher redirects to installed runtime and waits for actual model readiness", flush=True)
 
-            settings = dict(state["settings"], llm_model="not-an-auto-download-model")
-            request = urllib.request.Request("http://127.0.0.1:18767/api/settings", method="PUT",
-                                             data=json.dumps(settings).encode(),
-                                             headers={"Content-Type": "application/json", "X-Scribe-Request": "1"})
-            with opener.open(request, timeout=2):
-                pass
+            subprocess.run(command + ["--stop"], env=env, check=True)
+            settings_file = runtime / "data" / "settings.json"
+            settings = json.loads(settings_file.read_text())
+            settings["llm_model"] = "not-an-auto-download-model"
+            settings_file.write_text(json.dumps(settings))
             rejected = subprocess.run(command + ["--download-models"], env=env, capture_output=True, text=True, timeout=10)
             assert rejected.returncode != 0, "A rejected model setup must not report success."
             print("PASS: rejected model preparation returns a failure exit status", flush=True)

@@ -14,7 +14,7 @@
 1. Apple Command Line Tools가 없다면 터미널에서 `xcode-select --install`을 실행해 설치를 마칩니다. [Apple 다운로드 안내](https://developer.apple.com/xcode/resources/)
 2. 위 ZIP을 풀고, 해당 폴더에서 `setup.command`를 실행합니다. 터미널에서는 `zsh setup.command`로 실행할 수 있습니다.
 3. 설치 완료 메시지가 나오면 `~/Applications/Local LLM Encoder.app`을 엽니다. Dock에 고정하려면 아이콘 우클릭 → 옵션 → Dock에 유지를 선택합니다.
-4. 패널에서 보관함 비밀번호를 8자 이상으로 설정합니다. 기존 녹음과 텍스트는 검증 후 암호화해 보관합니다. Mac 앱에서는 키체인 저장과 Touch ID/Mac 암호 인증을 사용할 수 있습니다. [암호화·백업·보호 범위](docs/security.md)
+4. 패널에서 **Touch ID** 또는 **Mac 로그인 암호로 열기**를 누르고 macOS 인증창에서 인증합니다. 별도 앱 비밀번호는 만들지 않습니다. 기존 보관함은 저장된 키체인 연결을 한 번의 본인 인증으로 전환합니다. [암호화·백업·보호 범위](docs/security.md)
 
 설치 파일은 Python 3.12, 잠긴 Python 의존성, Ollama, Whisper small, Qwen3 4B Instruct를 준비합니다. Python은 [uv의 관리형 Python 다운로드](https://docs.astral.sh/uv/guides/install-python/)를 사용합니다. Ollama가 없으면 공식 `v0.33.3` CLI 배포본을 받아 SHA-256을 확인하고 앱 전용 폴더에 설치합니다. 기존 Ollama가 있으면 그대로 사용합니다. 처음에는 인터넷과 모델 약 3GB 외에 Python 환경·다운로드 임시 공간이 필요합니다.
 
@@ -75,7 +75,7 @@ zsh download-models.command
 
 메뉴에서 환경설정, 서버 시작·중지·재시작, 현재 작업 중단, 녹음·결과 폴더 열기, 로그 보기를 사용할 수 있습니다. 작업 중에는 서버 중지·재시작·모두 종료가 비활성화되므로 먼저 **현재 작업 중단**을 누르세요. **컨트롤러만 종료**는 서버를 유지하고, **모두 종료**는 이 프로젝트가 시작한 서버와 Ollama를 함께 종료합니다. 기존에 실행 중이던 Ollama는 종료하지 않습니다.
 
-패널 창을 닫아도 메뉴 막대 아이콘은 유지됩니다. 아이콘이나 Dock 아이콘을 누르면 패널이 다시 열립니다. 브라우저에서 **http://localhost:18765** 로 열 수도 있습니다. 자동 로그인 실행은 설정하지 않습니다.
+패널 창을 닫아도 메뉴 막대 아이콘은 유지됩니다. 아이콘이나 Dock 아이콘을 누르면 패널이 다시 열립니다. **http://localhost:18765**를 브라우저로 열면 Mac 앱으로 이동하는 안내가 표시됩니다. 녹음·메모 접근과 본인 인증은 Mac 앱에서만 제공합니다. 자동 로그인 실행은 설정하지 않습니다.
 
 `start.command`는 서버와 메뉴 컨트롤러를 실행하며, `stop.command`는 서버를 중지합니다. 메뉴 컨트롤러를 다시 빌드·설치하려면 메뉴에서 **모두 종료**를 누른 뒤 `install-menubar.command`를 실행합니다. 빌드에는 Apple Command Line Tools가 필요합니다. 실행 코드와 데이터는 `~/Library/Application Support/Azimuth Scribe Local/`에 설치되므로 앱 실행에 문서 폴더 접근 권한은 필요하지 않습니다. 다시 설치해도 기존 설치의 데이터는 유지합니다.
 
@@ -118,7 +118,7 @@ python3 launcher.py --stop
 | `data/Recordings/*.enc` | 암호화된 녹음 및 불러온 음성 파일 사본 |
 | `data/Results/*.enc` | 암호화된 TXT·Markdown 결과 |
 | `data/workspace.json.enc` | 암호화된 파일 목록, 받아쓰기, 요약 |
-| `data/vault.json` | 비밀번호로 암호화한 보관함 키와 복호화 메타데이터 |
+| `data/vault.json` | 키체인에 저장한 무작위 비밀값으로 암호화한 보관함 키와 메타데이터 |
 | `data/settings.json` | 모델과 언어 설정 |
 | `data/prompts.json.enc`, `data/replacements.json.enc` | 암호화된 사용자 서식과 일괄 수정 규칙 |
 | `data/models/` | Whisper 모델 |
@@ -127,7 +127,7 @@ python3 launcher.py --stop
 | `.vendor/ollama-0.33.3/` | 기존 Ollama가 없을 때 설치하는 공식 CLI와 라이브러리 |
 | `~/.ollama/models/` | Ollama의 로컬 모델 (기존 Ollama와 공유) |
 
-백업 시 서버를 중지하고 `vault.json`을 포함한 `data/` 전체를 복사합니다. 보관함 비밀번호도 필요합니다. 목록에서 제거해도 암호화된 음성은 남습니다. 기존에 가져온 원본·이전 백업은 자동으로 변경하지 않습니다. [보호 범위와 복구 안내](docs/security.md)를 확인하세요.
+백업 시 서버를 중지하고 `vault.json`을 포함한 `data/` 전체를 복사합니다. 복원에는 해당 보관함의 Mac 키체인 항목도 필요하며, Mac 로그인 암호만으로 새 Mac에서 복구할 수 없습니다. 목록에서 제거해도 암호화된 음성은 남습니다. 기존에 가져온 원본·이전 백업은 자동으로 변경하지 않습니다. [보호 범위와 복구 안내](docs/security.md)를 확인하세요.
 
 ## 검증
 

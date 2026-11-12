@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import AVFoundation
 import Foundation
+import LocalAuthentication
 
 struct Health: Decodable { let app: String; let root: String }
 struct AppState: Decodable {
@@ -32,6 +33,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var vaultSession: String?
     private var vaultStatus: VaultStatus?
     private var vaultGeneration = 0
+    private var authContext: LAContext?
     private var window: NSPanel!
     private let panel = PanelModel()
     private lazy var workspace = Workspace(base: base)
@@ -105,6 +107,10 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showPanel()
         return false
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if urls.contains(where: { $0.scheme == "localllmencoder" && $0.host == "open" }) { showPanel() }
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
@@ -494,19 +500,9 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func handleVaultMessage(_ message: [String: Any]) {
         switch message["action"] as? String {
-        case "session":
-            guard let token = message["session"] as? String, token.count <= 100,
-                  let identity = message["id"] as? String, identity.count == 32 else { return }
-            vaultSession = token
-            vaultGeneration += 1
-            refresh()
-            if let password = message["password"] as? String {
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    do { try VaultKeychain.remember(password, identity: identity) }
-                    catch { DispatchQueue.main.async { self?.workspace.report(error.localizedDescription) } }
-                }
-            }
-        case "unlock": unlockUsingKeychain()
+        case "authenticate":
+            guard let method = message["method"] as? String, ["touchid", "password"].contains(method) else { return }
+            unlockUsingKeychain(method: method)
         case "locked": clearPrivateSession(); refresh()
         case "export":
             guard let path = message["url"] as? String,
@@ -530,27 +526,35 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func unlockUsingKeychain() {
-        guard let identity = vaultStatus?.id, !panel.busy else { return }
+    private func unlockUsingKeychain(method: String) {
+        guard let status = vaultStatus, connected, !panel.busy, authContext == nil else { return }
+        let context = LAContext(), generation = vaultGeneration
+        authContext = context
         panel.busy = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
             do {
-                let password = try VaultKeychain.password(identity: identity)
+                let result = try VaultKeychain.open(status: status, method: method, context: context, root: self.root)
+                guard let token = result["session"] as? String else { throw NativeVaultChannel.failure("보관함 세션을 받지 못했습니다.") }
                 DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.request("api/vault/unlock", body: ["password": password]) { data, error in
-                        self.panel.busy = false
-                        guard let data, let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                              let token = result["session"] as? String else {
-                            self.workspace.report(error?.localizedDescription ?? "보관함을 열 수 없습니다."); return
+                    self.authContext = nil
+                    guard generation == self.vaultGeneration else {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            _ = try? NativeVaultChannel.call(["action": "lock"], root: self.root)
+                            DispatchQueue.main.async { self.panel.busy = false; self.refresh() }
                         }
-                        self.vaultSession = token
-                        self.vaultGeneration += 1
-                        self.workspace.setSession(token) { self.refresh() }
+                        return
                     }
+                    self.panel.busy = false
+                    self.vaultSession = token
+                    self.vaultGeneration += 1
+                    self.workspace.setSession(token) { self.refresh() }
                 }
             } catch {
-                DispatchQueue.main.async { self?.panel.busy = false; self?.workspace.report(error.localizedDescription) }
+                DispatchQueue.main.async {
+                    self.authContext = nil; self.panel.busy = false
+                    if generation == self.vaultGeneration { self.workspace.report(error.localizedDescription) }
+                }
             }
         }
     }
@@ -560,7 +564,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         vaultSession = nil
         state = nil
         panel.job = ""; panel.notice = ""; panel.failed = false
-        vaultStatus = VaultStatus(initialized: vaultStatus?.initialized ?? true, locked: true, locking: false, id: vaultStatus?.id)
+        vaultStatus = VaultStatus(initialized: vaultStatus?.initialized ?? true, locked: true, locking: false, id: vaultStatus?.id, authMode: vaultStatus?.authMode)
         panel.vaultLocked = true
         workspace.clearPrivate()
     }
@@ -569,6 +573,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func screenLocked() { lockVault() }
 
     private func lockVault(completion: (() -> Void)? = nil) {
+        if let context = authContext { context.invalidate(); vaultGeneration += 1 }
         if let recorder {
             recorder.stop(); self.recorder = nil; meterTimer?.invalidate()
             panel.recording = false; panel.pending = true; statusItem.button?.title = ""

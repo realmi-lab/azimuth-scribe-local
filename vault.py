@@ -8,6 +8,7 @@ import io
 import json
 import math
 import os
+import re
 from pathlib import Path
 import secrets
 import struct
@@ -132,13 +133,14 @@ class Vault:
     def status(self):
         return {"initialized": self.meta is not None, "locked": not self.unlocked,
                 "locking": self.closing, "id": self.meta["id"] if self.meta else None,
+                "auth_mode": self.meta.get("auth_mode", "legacy") if self.meta else "macos",
                 "idle_seconds": IDLE_SECONDS}
 
     @staticmethod
     def _derive(password, salt):
         return Scrypt(salt=salt, length=32, n=2**15, r=8, p=1).derive(password.encode("utf-8"))
 
-    def setup(self, password):
+    def setup(self, password, *, identity=None, native=False):
         if self.meta:
             raise VaultError("이미 보관함이 있습니다. 비밀번호로 잠금을 해제하세요.")
         if any(self.folder.glob("*.enc")):
@@ -147,12 +149,37 @@ class Vault:
             raise VaultError("기존 암호화 파일의 vault.json이 없습니다. 보관함 전체 백업을 복원하세요.")
         if not 8 <= len(password) <= 256 or not password.strip() or len(password.encode("utf-8")) > 1024:
             raise VaultError("보관함 비밀번호는 8~256자로 입력하세요.")
-        key, salt, nonce, identity = secrets.token_bytes(32), secrets.token_bytes(16), secrets.token_bytes(12), uuid.uuid4().hex
+        if native:
+            self._native_secret(password)
+        identity = identity or uuid.uuid4().hex
+        if not re.fullmatch(r"[0-9a-f]{32}", identity):
+            raise VaultError("보관함 식별자가 올바르지 않습니다.")
+        key, salt, nonce = secrets.token_bytes(32), secrets.token_bytes(16), secrets.token_bytes(12)
         wrapped = AESGCM(self._derive(password, salt)).encrypt(nonce, key, identity.encode())
         meta = {"version": 1, "id": identity, "salt": salt.hex(), "nonce": nonce.hex(), "wrapped_key": wrapped.hex()}
+        if native:
+            meta["auth_mode"] = "macos"
         # Commit the wrapped key before migration: a crash can always be resumed.
         self._atomic(self.meta_path, json.dumps(meta).encode())
         self.meta, self._key = meta, bytearray(key)
+
+    @staticmethod
+    def _native_secret(secret):
+        if not isinstance(secret, str) or not re.fullmatch(r"[A-Za-z0-9+/]{43}=", secret):
+            raise VaultError("Mac 키체인 인증 키 형식이 올바르지 않습니다.")
+
+    def adopt_native(self, legacy_secret, native_secret):
+        """Rewrap the same data key, retaining the ID and every encrypted file."""
+        self._native_secret(native_secret)
+        if not self.meta or self.meta.get("auth_mode") == "macos":
+            raise VaultError("기존 비밀번호 방식의 보관함이 아닙니다.")
+        self.unlock(legacy_secret)
+        salt, nonce = secrets.token_bytes(16), secrets.token_bytes(12)
+        wrapped = AESGCM(self._derive(native_secret, salt)).encrypt(nonce, bytes(self._key), self.meta["id"].encode())
+        meta = {**self.meta, "salt": salt.hex(), "nonce": nonce.hex(), "wrapped_key": wrapped.hex(), "auth_mode": "macos"}
+        self._atomic(self.meta_path, json.dumps(meta).encode())
+        self.meta = meta
+        self.sessions.clear()
 
     def unlock(self, password):
         if not self.meta:

@@ -4,14 +4,16 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const {spawn} = require("node:child_process");
+const {spawn, execFile} = require("node:child_process");
+const run = require("node:util").promisify(execFile);
 const {JSDOM, VirtualConsole} = require("jsdom");
 const root = path.resolve(__dirname, "..");
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), "scribe-dom-"));
 const base = "http://127.0.0.1:8767";
 const log = fs.openSync(path.join(folder, "server.log"), "w");
-const child = spawn(path.join(root, ".venv/bin/python"), [path.join(root, "server.py")], {
-  env: {...process.env, SCRIBE_DATA_DIR: folder, SCRIBE_PORT: "8767"}, stdio: ["ignore", log, log]
+const env = {...process.env, SCRIBE_DATA_DIR: folder, SCRIBE_PORT: "8767"};
+const child = spawn(path.join(root, ".venv/bin/python"), [path.join(root, "tests/native-fixture.py"), "serve"], {
+  env, stdio: ["ignore", log, log]
 });
 let dom, authCookie = "";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -46,15 +48,43 @@ async function main() {
   const copied = [];
   Object.defineProperty(w.navigator, "clipboard", {value: {writeText: async value => copied.push(value)}});
   w.eval(["vault.js", "app.js", "history.js", "panel.js"].map(name => fs.readFileSync(path.join(root, "static", name), "utf8")).join("\n"));
-  await until(() => $("vault-title").textContent.includes("만들기"), "vault setup form");
+  await until(() => $("vault-title").textContent.includes("Mac 앱"), "browser requires Mac app");
   assert.equal(d.body.classList.contains("vault-locked"), true);
-  assert.equal($("vault-password").minLength, 8);
-  assert.ok($("vault-note").textContent.includes("8자 이상"));
+  assert.equal(d.querySelectorAll('input[type="password"]').length, 0);
+  assert.equal($("vault-touchid").hidden, true);
+  assert.equal($("vault-open-app").hidden, false);
   assert.equal((await fetch(base + "/api/state")).status, 423);
-  $("vault-password").value = $("vault-confirm").value = "test1234";
-  $("vault-form").dispatchEvent(new w.Event("submit", {bubbles:true, cancelable:true}));
-  await until(() => $("vault-gate").hidden, "vault setup complete");
-  process.stdout.write("PASS: initial vault lock and password setup\n");
+  assert.equal((await fetch(base + "/api/vault/setup", {method:"POST", headers:{"X-Scribe-Request":"1"}})).status, 410);
+  const bridgeMessages = [];
+  let cancelNext = true;
+  // Simulate the already-authenticated boundary only in a disposable fixture.
+  // The production controller's LocalAuthentication is checked on the Mac.
+  w.webkit = {messageHandlers:{scribeVault:{postMessage: async message => {
+    bridgeMessages.push(message);
+    if (message.action === "export") { downloads.push(new URL(message.url, base).href); return; }
+    if (message.action !== "authenticate") return;
+    if (cancelNext) {
+      cancelNext = false;
+      w.dispatchEvent(new w.CustomEvent("vault-native-error", {detail:"인증을 취소했습니다. 보관함은 잠겨 있습니다."}));
+      return;
+    }
+    try {
+      const result = await run(path.join(root, ".venv/bin/python"), [path.join(root, "tests/native-fixture.py"), "unlock"], {env});
+      authCookie = "scribe_vault=" + JSON.parse(result.stdout).session;
+      w.dispatchEvent(new w.Event("hashchange"));
+    } catch (error) { w.dispatchEvent(new w.CustomEvent("vault-native-error", {detail:error.message})); }
+  }}}};
+  w.dispatchEvent(new w.Event("hashchange"));
+  await until(() => !$("vault-touchid").hidden, "native authentication controls");
+  assert.equal($("vault-open-app").hidden, true);
+  $("vault-touchid").click();
+  await until(() => $("vault-error").textContent.includes("취소"), "authentication cancel keeps vault locked");
+  assert.equal($("vault-gate").hidden, false);
+  assert.equal((await fetch(base + "/api/state")).status, 423);
+  $("vault-mac-password").click();
+  await until(() => $("vault-gate").hidden, "Mac authentication opens vault");
+  assert.deepEqual(bridgeMessages.filter(m => m.action === "authenticate").map(m => m.method), ["touchid", "password"]);
+  process.stdout.write("PASS: browser gate, no app password, native auth choices and cancel/retry flow\n");
   await until(() => $("app-status").textContent.includes("모델"), "initial DOM render");
   assert.equal($("file-count").textContent, "0개");
   assert.equal($("prompt-select").options.length, 4);
@@ -153,20 +183,16 @@ async function main() {
   $("licenses-button").click(); assert.ok($("info-content").textContent.includes("faster-whisper")); $("info-dialog").close();
   $("vault-lock").click();
   await until(() => !$("vault-gate").hidden, "vault manual lock");
-  assert.equal($("vault-password").minLength, 1);
+  assert.equal(d.querySelectorAll('input[type="password"]').length, 0);
+  assert.equal($("vault-touchid").disabled, false);
   assert.equal($("transcript").value, "");
   assert.equal($("prompt-editor").value, "");
   assert.equal($("file-list").children.length, 0);
   assert.equal($("history-search").value, "");
   assert.equal((await fetch(base + "/api/state", {headers:{Cookie:authCookie}})).status, 423);
-  $("vault-password").value = "wrong-password";
-  $("vault-form").dispatchEvent(new w.Event("submit", {bubbles:true, cancelable:true}));
-  await until(() => $("vault-error").textContent.includes("올바르지"), "wrong password error");
-  $("vault-password").value = "test1234";
-  $("vault-form").dispatchEvent(new w.Event("submit", {bubbles:true, cancelable:true}));
+  $("vault-touchid").click();
   await until(() => $("vault-gate").hidden && $("transcript").value.includes("제품 시연"), "unlock restores encrypted text");
-  assert.equal($("vault-password").value, "");
-  process.stdout.write("PASS: manual lock clears private UI, password errors and encrypted restore\n");
+  process.stdout.write("PASS: manual lock clears private UI and native reauthentication restores encrypted text\n");
   assert.deepEqual(errors.map(e => e.message), []);
   process.stdout.write("PASS: Markdown save/download, help, notices and no JavaScript runtime errors\n");
 }
