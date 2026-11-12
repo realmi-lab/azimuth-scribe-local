@@ -9,6 +9,8 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/panel.css">
+  <script src="/static/panel.js" defer></script>
 </head>
 <body>
 <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -37,6 +39,11 @@
   </div>
   <button class="help-button" id="help-button">사용 방법 <span>?</span></button>
 </nav>
+<section id="panel-options" aria-label="설정" hidden>
+  <button id="panel-preferences">모델 및 음성 인식 설정</button>
+  <button id="panel-prompts">요약 서식 편집</button>
+  <button id="panel-results">저장한 결과 보기</button>
+</section>
 <main class="workspace" id="workspace">
   <div class="left-column">
     <section class="panel record-panel" aria-labelledby="record-title">
@@ -50,7 +57,6 @@
       <div class="file-actions"><button id="stt-button" class="button primary"><svg class="icon"><use href="#i-spark"/></svg><span>STT</span></button><button id="add-button" class="button"><svg class="icon"><use href="#i-upload"/></svg>Add</button><button id="delete-button" class="button"><svg class="icon"><use href="#i-trash"/></svg>Delete</button></div>
       <input type="file" id="audio-input" accept=".wav,.mp3,.m4a,.flac,.ogg,.aac,.webm,.mp4,.aiff,.aif" multiple hidden>
       <div class="file-table-wrap"><table class="file-table"><thead><tr><th class="select-cell"><input type="checkbox" id="select-all" aria-label="모든 파일 선택"></th><th>file name</th><th class="duration-cell">duration</th><th class="status-cell">status</th></tr></thead><tbody id="file-list"></tbody></table><button class="empty-files" id="empty-files"><svg class="icon"><use href="#i-file"/></svg><strong>아직 녹음 파일이 없습니다</strong><span>파일을 끌어 놓거나 Add를 눌러 추가하세요.</span><small>WAV · MP3 · M4A · FLAC · OGG · AAC</small></button></div>
-      <div class="audio-player" id="audio-player" hidden><span id="playing-name"></span><audio id="audio-preview" controls preload="none"></audio><button class="icon-button" id="close-player" aria-label="재생 창 닫기"><svg class="icon"><use href="#i-close"/></svg></button></div>
       <div class="drop-overlay">음성 파일을 놓아 추가하세요</div>
     </section>
     <section class="panel transcript-panel" aria-labelledby="transcript-title">

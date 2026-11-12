@@ -407,10 +407,10 @@ def remove_files(body: FileSelection):
 
 
 @app.post("/api/transcribe")
-def transcribe():
+def transcribe(file_id: str | None = None):
     with LOCK:
         require_idle()
-        selected = [f for f in STATE["files"] if f["selected"]]
+        selected = [f for f in STATE["files"] if (f["id"] == file_id if file_id else f["selected"])]
         if not selected:
             raise HTTPException(400, "변환할 파일을 선택하세요.")
         if not model_installed():
@@ -458,6 +458,7 @@ def transcribe():
 
 
 class SummaryRequest(BaseModel):
+    file_id: str | None = None
     prompt: str
     expand_context: bool = False
 
@@ -466,7 +467,12 @@ class SummaryRequest(BaseModel):
 def summarize(body: SummaryRequest):
     with LOCK:
         require_idle()
-        text = STATE["transcript"].strip()
+        target = STATE
+        if body.file_id:
+            target = next((f for f in STATE["files"] if f["id"] == body.file_id), None)
+            if target is None:
+                raise HTTPException(404, "녹음을 찾을 수 없습니다.")
+        text = target["transcript"].strip()
         if not text:
             raise HTTPException(400, "요약할 받아쓰기 텍스트를 입력하세요.")
         if body.prompt not in PROMPTS:
@@ -513,7 +519,7 @@ def summarize(body: SummaryRequest):
     async def generate():
         job_update(message="로컬 LLM이 요약하고 있습니다…")
         with LOCK:
-            STATE["summary"] = ""
+            target["summary"] = ""
         finished, last_save = False, time.monotonic()
         async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=5), trust_env=False) as client:
             async with client.stream("POST", OLLAMA + "/api/generate", json=payload) as response:
@@ -528,7 +534,7 @@ def summarize(body: SummaryRequest):
                     if event.get("error"):
                         raise RuntimeError(event["error"])
                     with LOCK:
-                        STATE["summary"] += event.get("response", "")
+                        target["summary"] += event.get("response", "")
                     if time.monotonic() - last_save > 1:
                         persist()
                         last_save = time.monotonic()
@@ -541,7 +547,7 @@ def summarize(body: SummaryRequest):
                         break
         if not finished:
             raise RuntimeError("요약 연결이 중간에 끊겼습니다. 생성된 내용까지 보존했습니다.")
-        if not STATE["summary"].strip():
+        if not target["summary"].strip():
             raise RuntimeError("모델이 빈 응답을 반환했습니다. 모델과 입력 텍스트를 확인하세요.")
         RT.ollama_checked = 0
 

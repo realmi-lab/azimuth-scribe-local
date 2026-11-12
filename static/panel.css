@@ -1,0 +1,53 @@
+body[data-panel] {
+  color-scheme: light dark;
+  font: 13px -apple-system, sans-serif;
+  background: transparent;
+  color: CanvasText;
+  min-width: 0;
+}
+body[data-panel] :is(.app-header,.menu-bar,.record-panel,.workspace .panel,.localhost-label) { display:none }
+body[data-panel] .workspace, body[data-panel] .left-column { display:contents }
+body[data-panel="files"] .workspace .files-panel,
+body[data-panel="summary"] .workspace .summary-panel,
+body[data-panel="transcript"] .workspace .transcript-panel {
+  display:flex; flex-direction:column; gap:12px; min-height:0; padding:4px;
+  border:0; border-radius:0; background:transparent; box-shadow:none;
+}
+body[data-panel] .panel h2 { font:600 15px -apple-system,sans-serif; color:CanvasText }
+body[data-panel] .panel textarea {
+  box-sizing:border-box; margin:0; width:100%; height:52vh; min-height:110px;
+  padding:10px; line-height:1.55; resize:vertical; color:FieldText; background:Field;
+}
+body[data-panel] .summary-controls { flex-wrap:wrap; margin:0 }
+body[data-panel] .status-bar { position:static; margin-top:12px; padding:8px 4px; background:transparent; color:GrayText; font-size:11px }
+body[data-panel] .file-table-wrap { overflow:auto; max-height:54vh }
+body[data-panel] #panel-options:not([hidden]) { display:grid; gap:1px; border-radius:9px; overflow:hidden }
+body[data-panel] #panel-options button { padding:13px; text-align:left; border:0; color:CanvasText; background:color-mix(in srgb,CanvasText 7%,Canvas) }
+body[data-panel] #panel-options button::after { content:"›"; float:right; color:GrayText }
+body[data-panel] dialog { color-scheme:light; max-height:96vh; width:calc(100% - 8px) }
+body[data-panel] .dialog-body { padding:12px; overflow:auto }
+body[data-panel] .file-preview { max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere }
+body[data-panel] .file-table-wrap,body[data-panel] .button:not(.primary):not(.stop) { color-scheme:light }
+body[data-panel] .toast { bottom:8px }
+
+/* Large in-panel workspace: files + transcript on the left, summary on the right. */
+body[data-panel="workspace"] { margin:0; overflow:hidden }
+body[data-panel="workspace"] .workspace {
+  display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px;
+  height:calc(100vh - 34px); min-height:0; padding:0; margin:0; max-width:none;
+}
+body[data-panel="workspace"] .left-column { display:flex; flex-direction:column; gap:14px; min-height:0 }
+body[data-panel="workspace"] .workspace :is(.files-panel,.transcript-panel,.summary-panel) {
+  display:flex; flex-direction:column; gap:8px; min-height:0; padding:2px;
+  border:0; border-radius:0; background:transparent; box-shadow:none;
+}
+body[data-panel="workspace"] .workspace .files-panel { flex:0 0 auto }
+body[data-panel="workspace"] .workspace :is(.transcript-panel,.summary-panel) { flex:1 1 auto }
+body[data-panel="workspace"] .file-table-wrap { max-height:150px; min-height:0 }
+body[data-panel="workspace"] .panel textarea { flex:1; height:auto; min-height:90px; resize:none }
+body[data-panel="workspace"] .status-bar { margin-top:6px; padding:4px 2px }
+/* Secondary buttons are forced to the light scheme; give them matching light colors so labels stay visible in dark mode. */
+body[data-panel] .button:not(.primary):not(.stop) { color:#2b4660; background:#fff; border-color:#c4d0de }
+body[data-panel] .button:not(.primary):not(.stop) .icon { stroke:currentColor }
+html:has(body[data-panel]) { background:transparent }
+body[data-panel] .summary-controls select { color-scheme:light; color:#2b4660; background:#fff }
