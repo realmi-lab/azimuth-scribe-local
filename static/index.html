@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="내 컴퓨터에서 녹음하고, 받아쓰고, 요약하는 로컬 AI 기록 도우미">
   <meta name="theme-color" content="#e9eff6">
-  <title>Azimuth Scribe · Local</title>
+  <title>Local LLM Encoder</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
@@ -28,13 +28,13 @@
   <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
 </svg>
 <header class="app-header">
-  <div class="brand"><div class="brand-icon"><svg class="icon"><use href="#i-mic"/></svg></div><div><h1>Azimuth Scribe</h1><p>LOCAL AI · VOICE TO NOTES</p></div></div>
+  <div class="brand"><div class="brand-icon"><svg class="icon"><use href="#i-mic"/></svg></div><div><h1>Local LLM Encoder</h1><p>LOCAL AI · VOICE TO NOTES</p></div></div>
   <span class="local-badge"><svg class="icon"><use href="#i-lock"/></svg>내 컴퓨터에서만 처리</span>
 </header>
 <nav class="menu-bar" aria-label="프로그램 메뉴">
   <div class="menus">
     <details class="menu"><summary>File</summary><div class="menu-items"><button data-action="save-transcript">Save STT text…</button><button data-action="save-summary">Save summary…</button><hr><button data-action="results">Results 폴더</button><button data-action="recordings">Recordings 폴더</button></div></details>
-    <details class="menu"><summary>Settings</summary><div class="menu-items"><button data-action="settings">Preferences…</button><button data-action="prompts">요약 서식 편집…</button></div></details>
+    <details class="menu"><summary>Settings</summary><div class="menu-items"><button data-action="settings">Preferences…</button><button data-action="prompts">요약 서식 편집…</button><button data-action="replace">일괄 수정…</button></div></details>
     <button class="menu-button" id="licenses-button">Third-Party Licenses</button>
   </div>
   <button class="help-button" id="help-button">사용 방법 <span>?</span></button>
@@ -42,6 +42,7 @@
 <section id="panel-options" aria-label="설정" hidden>
   <button id="panel-preferences">모델 및 음성 인식 설정</button>
   <button id="panel-prompts">요약 서식 편집</button>
+  <button id="panel-replace">일괄 수정 규칙</button>
   <button id="panel-results">저장한 결과 보기</button>
 </section>
 <main class="workspace" id="workspace">
@@ -62,7 +63,7 @@
     <section class="panel transcript-panel" aria-labelledby="transcript-title">
       <div class="panel-title"><h2 id="transcript-title">STEP 3 : STT result <span>받아쓰기</span></h2><span class="editable-label">직접 수정 가능</span></div>
       <label class="sr-only" for="transcript">받아쓰기 결과</label><textarea id="transcript" spellcheck="false" placeholder="음성 인식 결과가 여기에 표시됩니다.&#10;직접 텍스트를 입력하거나, 오인식된 내용을 수정할 수 있습니다."></textarea>
-      <div class="panel-footer"><span class="text-count" id="transcript-count">0자</span><div class="footer-buttons"><button class="button" id="clear-button">Clear</button><button class="button" id="save-transcript"><svg class="icon"><use href="#i-save"/></svg>Save…</button></div></div>
+      <div class="panel-footer"><span class="text-count" id="transcript-count">0자</span><div class="footer-buttons"><button class="button" data-open-replace>일괄 수정</button><button class="button" id="clear-button">Clear</button><button class="button" id="save-transcript"><svg class="icon"><use href="#i-save"/></svg>Save…</button></div></div>
     </section>
   </div>
   <section class="panel summary-panel" aria-labelledby="summary-title">
@@ -70,7 +71,7 @@
     <div class="summary-controls"><label for="prompt-select">Prompt:</label><select id="prompt-select" aria-label="요약 서식"><option>일반 요약</option></select><button class="button primary" id="summary-button"><svg class="icon"><use href="#i-spark"/></svg><span>Summary</span></button><button class="button copy-button" id="copy-button" title="요약 결과 복사"><svg class="icon"><use href="#i-copy"/></svg><span>Copy to Clipboard</span></button></div>
     <div class="model-label" id="model-label">Model: qwen3:4b-instruct · Device: Auto</div>
     <label class="sr-only" for="summary">요약 결과</label><textarea id="summary" spellcheck="false" placeholder="요약 결과가 실시간으로 표시됩니다.&#10;&#10;받아쓰기 내용을 확인한 뒤, 원하는 서식을 고르고 Summary를 눌러 주세요."></textarea>
-    <div class="panel-footer"><span class="text-count" id="summary-count">0자</span><button class="button" id="save-summary"><svg class="icon"><use href="#i-save"/></svg>Save…</button></div>
+    <div class="panel-footer"><span class="text-count" id="summary-count">0자</span><div class="footer-buttons"><button class="button" data-open-replace>일괄 수정</button><button class="button" id="save-summary"><svg class="icon"><use href="#i-save"/></svg>Save…</button></div></div>
   </section>
 </main>
 <footer class="status-bar"><div class="status-main" role="status" aria-live="polite"><span class="status-dot" id="app-dot"></span><span id="app-status">로컬 프로그램에 연결 중…</span></div><progress id="job-progress" hidden></progress><span class="localhost-label"><svg class="icon"><use href="#i-lock"/></svg>localhost</span></footer>
@@ -80,7 +81,7 @@
   <div class="dialog-heading"><div><h2>Preferences</h2><p>로컬 모델과 음성 인식 설정</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div>
   <div class="dialog-body">
     <section class="system-status"><div class="section-label">시스템 상태 <button type="button" id="refresh-status">새로고침 ↻</button></div><div id="system-status-list"></div><div class="setup-progress" id="setup-progress" hidden></div></section>
-    <fieldset><legend>요약 모델 <small>Ollama</small></legend><div class="form-grid"><label class="wide">모델<select name="llm_model" id="llm-model"></select></label><label>실행 장치<select name="llm_device"><option value="auto">자동 (권장)</option><option value="cpu">CPU만</option><option value="gpu">GPU 우선</option></select></label><label>컨텍스트 길이<input type="number" name="context_length" min="2048" max="65536" step="1024" required></label><label>최대 출력 토큰<input type="number" name="max_tokens" min="256" max="16384" step="256" required></label><label>온도<input type="number" name="temperature" min="0" max="1" step="0.1" required></label></div><label class="checkbox-label"><input type="checkbox" id="qwen-only" checked> Qwen 모델만 표시</label></fieldset>
+    <fieldset><legend>요약 모델 <small>Ollama</small></legend><div class="form-grid"><label class="wide">모델<select name="llm_model" id="llm-model"></select></label><label>실행 장치<select name="llm_device"><option value="auto">자동 (권장)</option><option value="cpu">CPU만</option><option value="gpu">GPU 우선</option></select></label><label>컨텍스트 길이 <small>(부족하면 자동으로 늘림)</small><input type="number" name="context_length" min="2048" max="65536" step="1024" required></label><label>최대 출력 토큰 <small>(긴 회의는 자동으로 늘림)</small><input type="number" name="max_tokens" min="256" max="16384" step="256" required></label><label>온도<input type="number" name="temperature" min="0" max="1" step="0.1" required></label></div><label class="checkbox-label"><input type="checkbox" id="qwen-only" checked> Qwen 모델만 표시</label></fieldset>
     <fieldset><legend>음성 인식 <small>Whisper</small></legend><div class="form-grid"><label>모델<select name="whisper_model"><option value="base">base · 약 150 MB</option><option value="small">small · 약 500 MB (이 Mac 기본)</option><option value="medium">medium · 약 1.5 GB</option><option value="large-v3">large-v3 · 약 3 GB</option></select></label><label>실행 장치<select name="whisper_device"><option value="auto">자동</option><option value="cpu">CPU</option><option value="cuda">GPU (NVIDIA CUDA)</option></select></label><label>연산 방식<select name="whisper_compute"><option value="auto">자동 (권장)</option><option value="int8">int8</option><option value="int8_float16">int8_float16</option><option value="float16">float16</option></select></label><label>언어<select name="language"><option value="ko">한국어</option><option value="en">영어</option><option value="ja">일본어</option><option value="zh">중국어</option><option value="auto">자동 감지</option></select></label></div><p class="field-note">이 Mac의 Whisper는 CPU를 사용합니다. Ollama는 Apple GPU를 자동으로 활용합니다.</p></fieldset>
     <div class="model-setup"><div><strong>모델 준비</strong><p>선택한 모델을 내려받고 음성 인식 모델을 불러옵니다.<br>처음 준비할 때만 인터넷이 필요합니다.</p></div><button type="button" class="button" id="prepare-models">모델 준비 / 다시 불러오기</button></div>
     <div class="data-location"><span>데이터 저장 위치</span><code id="data-path"></code></div>
@@ -94,6 +95,7 @@
 
 <dialog id="storage-dialog"><div class="dialog-heading"><div><h2 id="storage-title">Results</h2><p>이 컴퓨터에 저장된 파일</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body storage-list" id="storage-list"></div><div class="dialog-footer"><button class="button" data-close>닫기</button></div></dialog>
 
+<dialog id="replace-dialog"><form id="replace-form"><div class="dialog-heading"><div><h2>일괄 수정</h2><p>잘못 인식된 말을 받아쓰기와 요약에서 한 번에 바꿉니다.</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><div class="replace-head"><span>찾을 말</span><span></span><span>바꿀 말</span><span></span></div><div id="replace-rules" class="replace-rules"></div><button type="button" class="button" id="add-replace-rule">+ 규칙 추가</button><p class="field-note">띄어쓰기가 달라도 찾습니다. 예: ‘슬라시크레이트’ 규칙은 ‘슬라시 크레이트’도 바꿉니다.<br>저장한 규칙은 앞으로 만드는 받아쓰기와 요약에도 자동으로 적용됩니다.</p><div id="replace-error" class="inline-error" role="alert" hidden></div></div><div class="dialog-footer"><button type="button" class="button" data-close>닫기</button><button type="button" class="button" id="save-replace">규칙만 저장</button><button type="submit" class="button primary">저장하고 지금 바꾸기</button></div></form></dialog>
 <dialog id="info-dialog"><div class="dialog-heading"><h2 id="info-title"></h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body info-content" id="info-content"></div><div class="dialog-footer"><button class="button" data-close>닫기</button></div></dialog>
 <dialog id="confirm-dialog" class="small-dialog"><div class="dialog-heading"><h2>컨텍스트 길이 조정</h2></div><div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button class="button" id="confirm-no">취소</button><button class="button primary" id="confirm-yes">늘려서 실행</button></div></dialog>
 </body>

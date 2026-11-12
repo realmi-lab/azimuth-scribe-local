@@ -148,7 +148,7 @@ def main():
         time.sleep(0.2)
     else:
         raise RuntimeError(f"서버 시작에 실패했습니다. 포트 {PORT}와 data/server.log를 확인하세요.")
-    print(f"Azimuth Scribe 실행 완료: {URL}")
+    print(f"Local LLM Encoder 실행 완료: {URL}")
     print("종료: stop.command 또는 python3 launcher.py --stop")
     prepare_models(wait=args.download_models)
     if args.open:

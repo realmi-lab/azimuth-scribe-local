@@ -1,4 +1,4 @@
-# Azimuth Scribe · Local
+# Local LLM Encoder
 
 [Azimuth Scribe의 공개 소개](https://azimuthkorea.blogspot.com/2026/10/azimuth-scribe.html)와 사용자 매뉴얼의 화면·기능을 참고해 새로 구현한 localhost 웹앱입니다. 원본 Windows 실행 파일이나 원본 프로그램 코드를 사용하지 않습니다.
 
@@ -12,7 +12,7 @@
 
 1. Apple Command Line Tools가 없다면 터미널에서 `xcode-select --install`을 실행해 설치를 마칩니다. [Apple 다운로드 안내](https://developer.apple.com/xcode/resources/)
 2. 위 ZIP을 풀고, 해당 폴더에서 `setup.command`를 실행합니다. 터미널에서는 `zsh setup.command`로 실행할 수 있습니다.
-3. 설치 완료 메시지가 나오면 `~/Applications/Azimuth Scribe.app`을 엽니다. Dock에 고정하려면 아이콘 우클릭 → 옵션 → Dock에 유지를 선택합니다.
+3. 설치 완료 메시지가 나오면 `~/Applications/Local LLM Encoder.app`을 엽니다. Dock에 고정하려면 아이콘 우클릭 → 옵션 → Dock에 유지를 선택합니다.
 
 설치 파일은 Python 3.12, 잠긴 Python 의존성, Ollama, Whisper small, Qwen3 4B Instruct를 준비합니다. Python은 [uv의 관리형 Python 다운로드](https://docs.astral.sh/uv/guides/install-python/)를 사용합니다. Ollama가 없으면 공식 `v0.33.3` CLI 배포본을 받아 SHA-256을 확인하고 앱 전용 폴더에 설치합니다. 기존 Ollama가 있으면 그대로 사용합니다. 처음에는 인터넷과 모델 약 3GB 외에 Python 환경·다운로드 임시 공간이 필요합니다.
 
@@ -30,7 +30,7 @@ zsh setup.command
 
 처음 설치 후에는 모델을 다시 내려받지 않고 로컬 파일을 사용합니다.
 
-1. Dock의 **Azimuth Scribe** 또는 `~/Applications/Azimuth Scribe.app`을 엽니다.
+1. Dock의 **Local LLM Encoder** 또는 `~/Applications/Local LLM Encoder.app`을 엽니다.
 2. 상단 마이크 아이콘 또는 Dock 아이콘의 우클릭 메뉴로 제어합니다.
 3. **프로그램 열기**를 누르면 필요한 경우 서버를 시작하고 **http://localhost:18765** 를 엽니다.
 

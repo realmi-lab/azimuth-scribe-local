@@ -80,6 +80,7 @@ def load_json(path: Path, default):
 STATE = load_json(DATA / "workspace.json", {"files": [], "transcript": "", "summary": ""})
 CONFIG = Settings(**load_json(DATA / "settings.json", {}))
 PROMPTS = load_json(DATA / "prompts.json", DEFAULT_PROMPTS)
+REPLACEMENTS = load_json(DATA / "replacements.json", [])
 for item in STATE["files"]:
     if item["status"] == "Processing":
         item["status"] = "Pending"
@@ -94,6 +95,23 @@ def write_json(path: Path, value):
 def persist():
     with LOCK:
         write_json(DATA / "workspace.json", STATE)
+
+
+def replacement_pattern(find):
+    """Match the word even when spacing differs (e.g. "슬라시크레이트" also matches "슬라시 크레이트")."""
+    chars = [c for c in find if not c.isspace()]
+    return re.compile(r"\s*".join(re.escape(c) for c in chars)) if chars else None
+
+
+def apply_replacements(text, rules=None):
+    """Apply batch-correction rules in order; returns (new_text, number_of_replacements)."""
+    count = 0
+    for rule in REPLACEMENTS if rules is None else rules:
+        pattern = replacement_pattern(rule["find"])
+        if pattern and text:
+            text, n = pattern.subn(lambda _match, value=rule["replace"]: value, text)
+            count += n
+    return text, count
 
 
 def local_client(timeout=10):
@@ -278,6 +296,7 @@ def get_state(refresh: bool = False):
     status = ollama_status(force=refresh)
     with LOCK:
         return {**copy.deepcopy(STATE), "settings": CONFIG.model_dump(), "prompts": copy.deepcopy(PROMPTS),
+                "replacements": copy.deepcopy(REPLACEMENTS),
                 "runtime": {"job": copy.deepcopy(RT.job), "stt": {**RT.model_status, "installed": model_installed()},
                             "ollama": status, "platform": platform.system(), "data_path": str(DATA),
                             "whisper_models": list(WHISPER_MODELS), "qwen_models": list(QWEN_MODELS)}}
@@ -437,7 +456,7 @@ def transcribe(file_id: str | None = None):
                         progress = (index + min(segment.end / info.duration, 0.99)) / len(selected)
                         job_update(progress=progress)
                 check_cancel()
-                text = " ".join(part for part in parts if part)
+                text, _ = apply_replacements(" ".join(part for part in parts if part))
                 with LOCK:
                     item.update(status="Completed", transcript=text)
                     block = f"[{item['name']}]\n{text}" if text else f"[{item['name']}]\n(인식된 음성 없음)"
@@ -461,6 +480,56 @@ class SummaryRequest(BaseModel):
     file_id: str | None = None
     prompt: str
     expand_context: bool = False
+
+
+SINGLE_PASS_TOKENS = 12000   # up to ~8,000 Korean chars (~30 min) is summarised in one pass
+CHUNK_TOKENS = 6000          # longer meetings are noted in parts of ~4,000 chars (~16 min)
+NOTE_TOKENS = 1536           # notes per part
+MERGE_TOKENS = 20000         # notes larger than this are condensed again before merging
+MAX_CHUNKS = 60              # ~360,000 tokens; far beyond any single meeting
+CHUNK_PROMPT = (
+    "다음은 긴 대화를 {total}개 구간으로 나눈 것 중 {index}번째 구간입니다. 이 구간의 내용을 빠짐없이 메모하세요.\n"
+    "- 논의 주제, 사실, 결정, 할 일과 담당자, 일정, 이름과 숫자는 원문 그대로 남기세요.\n"
+    "- 잡담, 군말, 같은 말 반복은 빼세요.\n- 한국어 Markdown 글머리표로만 쓰세요.\n\n"
+    "<대화_원문>\n{text}\n</대화_원문>")
+CONDENSE_PROMPT = (
+    "다음 회의 메모를 더 짧게 합치세요. 결정, 할 일과 담당자, 일정, 이름과 숫자는 빠뜨리지 말고, "
+    "겹치는 내용은 하나로 묶으세요. 한국어 Markdown 글머리표로만 쓰세요.\n\n<메모>\n{text}\n</메모>")
+MERGE_PROMPT = (
+    "{template}\n\n아래는 하나의 긴 대화를 {total}개 구간으로 나눠 순서대로 정리한 메모입니다. "
+    "메모에 있는 정보만 사용해 위 서식에 맞는 하나의 결과로 통합하세요. 겹치는 내용은 합치고 시간 순서를 지키세요.\n\n"
+    "<구간_메모>\n{notes}\n</구간_메모>")
+
+
+def estimate_tokens(value):
+    # Conservative: Korean is ~1.5 tokens per character (3 UTF-8 bytes).
+    return math.ceil(len(value.encode("utf-8")) / 2)
+
+
+def split_for_summary(text, limit, separator="\n"):
+    """Split text into parts of at most `limit` estimated tokens, preferring line and sentence breaks."""
+    pieces = []
+    for block in text.split(separator):
+        if estimate_tokens(block) <= limit:
+            pieces.append(block)
+            continue
+        for sentence in re.split(r"(?<=[.!?。？！…])\s+", block):
+            step = max(1, int(limit / 1.5))
+            while estimate_tokens(sentence) > limit:
+                pieces.append(sentence[:step])
+                sentence = sentence[step:]
+            pieces.append(sentence)
+    chunks, current = [], ""
+    for piece in pieces:
+        candidate = f"{current}{separator}{piece}" if current else piece
+        if current and estimate_tokens(candidate) > limit:
+            chunks.append(current)
+            current = piece
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk.strip()]
 
 
 @app.post("/api/summary")
@@ -493,62 +562,100 @@ def summarize(body: SummaryRequest):
             raise HTTPException(400, "텍스트를 생성할 수 있는 로컬 모델을 선택하세요.")
         if metadata.get("model_info", {}).get("general.finetune", "").lower() == "thinking":
             raise HTTPException(400, "추론 전용 모델은 요약 결과만 생성할 수 없습니다. qwen3:4b-instruct를 선택하세요.")
-    estimated = math.ceil(len((SYSTEM_PROMPT + template + text).encode("utf-8")) / 2)
-    if estimated > 32768:
-        raise HTTPException(400, "텍스트가 너무 깁니다. 일부씩 나누어 요약하세요. (최대 약 32,768 입력 토큰)")
-    needed = min(65536, math.ceil((estimated + CONFIG.max_tokens + 512) / 1024) * 1024)
-    context = CONFIG.context_length
-    if needed > context:
-        if not body.expand_context:
-            raise HTTPException(409, {"code": "context", "needed": needed, "message": f"긴 입력을 위해 컨텍스트를 이번에만 {needed:,} 토큰으로 늘릴까요?"})
-        context = needed
-    options = {"num_ctx": context, "num_predict": CONFIG.max_tokens, "temperature": CONFIG.temperature}
-    if CONFIG.llm_device == "cpu":
-        options["num_gpu"] = 0
-    elif CONFIG.llm_device == "gpu":
-        options["num_gpu"] = 99
-    payload = {"model": CONFIG.llm_model, "system": SYSTEM_PROMPT,
-               "prompt": f"{template}\n\n<대화_원문>\n{text}\n</대화_원문>\n/no_think",
-               "stream": True, "think": False, "options": options, "keep_alive": "5m"}
-    if (metadata.get("details", {}).get("family") == "qwen3"
-            and "thinking" in metadata.get("capabilities", [])
-            and metadata.get("model_info", {}).get("general.finetune", "").lower() != "instruct"):
-        payload["prompt"] = qwen_without_thinking(payload.pop("system"), payload["prompt"])
-        payload["raw"] = True
+    raw_qwen = (metadata.get("details", {}).get("family") == "qwen3"
+                and "thinking" in metadata.get("capabilities", [])
+                and metadata.get("model_info", {}).get("general.finetune", "").lower() != "instruct")
+    text_tokens = estimate_tokens(text)
+    chunks = [text] if text_tokens <= SINGLE_PASS_TOKENS else split_for_summary(text, CHUNK_TOKENS)
+    if len(chunks) > MAX_CHUNKS:
+        raise HTTPException(400, f"텍스트가 너무 깁니다. 최대 약 {MAX_CHUNKS * CHUNK_TOKENS:,} 토큰까지 요약할 수 있습니다.")
+    # Long meetings need longer minutes: allow output up to about half the input size
+    # (never below the user's setting, at most 8,192 tokens).
+    final_output = max(CONFIG.max_tokens, min(8192, math.ceil(text_tokens * 0.5 / 256) * 256))
 
-    async def generate():
-        job_update(message="로컬 LLM이 요약하고 있습니다…")
-        with LOCK:
-            target["summary"] = ""
-        finished, last_save = False, time.monotonic()
-        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=5), trust_env=False) as client:
-            async with client.stream("POST", OLLAMA + "/api/generate", json=payload) as response:
-                if response.is_error:
-                    await response.aread()
-                    response.raise_for_status()
-                async for line in response.aiter_lines():
-                    check_cancel()
-                    if not line:
-                        continue
-                    event = json.loads(line)
-                    if event.get("error"):
-                        raise RuntimeError(event["error"])
-                    with LOCK:
-                        target["summary"] += event.get("response", "")
+    def payload_for(prompt, num_predict):
+        """Ollama request whose context grows automatically to fit prompt + output."""
+        needed = estimate_tokens(SYSTEM_PROMPT + prompt) + num_predict + 512
+        options = {"num_ctx": max(CONFIG.context_length, min(65536, math.ceil(needed / 1024) * 1024)),
+                   "num_predict": num_predict, "temperature": CONFIG.temperature}
+        if CONFIG.llm_device == "cpu":
+            options["num_gpu"] = 0
+        elif CONFIG.llm_device == "gpu":
+            options["num_gpu"] = 99
+        payload = {"model": CONFIG.llm_model, "system": SYSTEM_PROMPT, "prompt": prompt + "\n/no_think",
+                   "stream": True, "think": False, "options": options, "keep_alive": "5m"}
+        if raw_qwen:
+            payload["prompt"] = qwen_without_thinking(payload.pop("system"), payload["prompt"])
+            payload["raw"] = True
+        return payload
+
+    async def run(client, payload, on_text=None):
+        """Stream one generation; returns (text, done_reason)."""
+        parts, last_save = [], time.monotonic()
+        async with client.stream("POST", OLLAMA + "/api/generate", json=payload) as response:
+            if response.is_error:
+                await response.aread()
+                response.raise_for_status()
+            async for line in response.aiter_lines():
+                check_cancel()
+                if not line:
+                    continue
+                event = json.loads(line)
+                if event.get("error"):
+                    raise RuntimeError(event["error"])
+                piece = event.get("response", "")
+                parts.append(piece)
+                if on_text:
+                    on_text(piece)
                     if time.monotonic() - last_save > 1:
                         persist()
                         last_save = time.monotonic()
-                    if event.get("done"):
-                        finished = True
-                        if event.get("done_reason") == "length":
-                            job_update(message="출력 토큰 한도에 도달했습니다. 설정에서 최대 출력 토큰을 늘려 주세요.")
-                        else:
-                            job_update(message="요약이 완료되었습니다.")
+                if event.get("done"):
+                    return "".join(parts), event.get("done_reason")
+        raise RuntimeError("요약 연결이 중간에 끊겼습니다. 생성된 내용까지 보존했습니다.")
+
+    def show(value):
+        with LOCK:
+            target["summary"] = value
+
+    def append(piece):
+        with LOCK:
+            target["summary"] += piece
+
+    async def generate():
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=5), trust_env=False) as client:
+            if len(chunks) == 1:
+                job_update(message="로컬 LLM이 요약하고 있습니다…")
+                prompt = f"{template}\n\n<대화_원문>\n{text}\n</대화_원문>"
+            else:
+                # 1) Note each part, 2) condense notes if still too long, 3) merge into the chosen format.
+                notes, total = [], len(chunks)
+                for index, chunk in enumerate(chunks, 1):
+                    job_update(message=f"긴 회의를 {total}개 구간으로 나눠 정리 중… ({index}/{total})", progress=(index - 1) / (total + 1))
+                    show("\n\n".join(notes) + f"\n\n(구간 {index}/{total} 정리 중…)")
+                    note, _ = await run(client, payload_for(CHUNK_PROMPT.format(index=index, total=total, text=chunk), NOTE_TOKENS))
+                    notes.append(f"### 구간 {index}/{total}\n{note.strip()}")
+                while estimate_tokens("\n\n".join(notes)) > MERGE_TOKENS:
+                    job_update(message="구간 메모를 한 번 더 압축하고 있습니다…")
+                    groups = split_for_summary("\n\n".join(notes), CHUNK_TOKENS, separator="\n\n")
+                    condensed = []
+                    for group in groups:
+                        note, _ = await run(client, payload_for(CONDENSE_PROMPT.format(text=group), NOTE_TOKENS))
+                        condensed.append(note.strip())
+                    if len(condensed) >= len(notes):
                         break
-        if not finished:
-            raise RuntimeError("요약 연결이 중간에 끊겼습니다. 생성된 내용까지 보존했습니다.")
-        if not target["summary"].strip():
+                    notes = condensed
+                job_update(message=f"{total}개 구간 메모를 하나의 결과로 합치고 있습니다…", progress=total / (total + 1))
+                prompt = MERGE_PROMPT.format(template=template, total=total, notes="\n\n".join(notes))
+            show("")
+            result, reason = await run(client, payload_for(prompt, final_output), append)
+        if not result.strip():
             raise RuntimeError("모델이 빈 응답을 반환했습니다. 모델과 입력 텍스트를 확인하세요.")
+        job_update(message="출력 토큰 한도에 도달했습니다. 설정에서 최대 출력 토큰을 늘려 주세요." if reason == "length"
+                   else "요약이 완료되었습니다." + (f" (긴 회의 · {len(chunks)}개 구간)" if len(chunks) > 1 else ""))
+        with LOCK:
+            target["summary"], _ = apply_replacements(target["summary"])
+        persist()
         RT.ollama_checked = 0
 
     async def cancellable():
@@ -593,6 +700,37 @@ def save_settings(body: Settings):
             RT.model = RT.model_key = None
             RT.model_status = {"state": "not_loaded", "message": "새 설정을 저장했습니다.", "device": None}
     return {"ok": True}
+
+
+class Replacement(BaseModel):
+    find: str = Field(min_length=1, max_length=200)
+    replace: str = Field(default="", max_length=200)
+
+
+class ReplacementUpdate(BaseModel):
+    rules: list[Replacement] = Field(default_factory=list, max_length=200)
+
+
+@app.put("/api/replacements")
+def save_replacements(body: ReplacementUpdate):
+    global REPLACEMENTS
+    rules = [{"find": r.find.strip(), "replace": r.replace} for r in body.rules if r.find.strip()]
+    with LOCK:
+        REPLACEMENTS = rules
+        write_json(DATA / "replacements.json", REPLACEMENTS)
+    return {"ok": True, "rules": REPLACEMENTS}
+
+
+@app.post("/api/replacements/apply")
+def apply_saved_replacements():
+    with LOCK:
+        if busy():
+            raise HTTPException(409, "작업이 끝난 뒤 일괄 수정하세요.")
+        counts = {}
+        for key in ("transcript", "summary"):
+            STATE[key], counts[key] = apply_replacements(STATE[key])
+        persist()
+    return {"count": counts["transcript"] + counts["summary"], **counts}
 
 
 class PromptUpdate(BaseModel):

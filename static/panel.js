@@ -19,6 +19,7 @@ if (initialPanelPage) {
   $("summary").placeholder = "서식을 고르고 요약 생성을 누르세요.";
   $("panel-preferences").onclick = action(openSettings);
   $("panel-prompts").onclick = action(openPrompts);
+  $("panel-replace").onclick = action(openReplace);
   $("panel-results").onclick = action(() => openStorage("results"));
   window.showPanelPage(initialPanelPage);
 }

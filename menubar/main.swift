@@ -68,10 +68,10 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.setActivationPolicy(.regular)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "mic.circle", accessibilityDescription: "Azimuth Scribe")
+            button.image = NSImage(systemSymbolName: "mic.circle", accessibilityDescription: "Local LLM Encoder")
             button.image?.isTemplate = true
             button.image?.size = NSSize(width: 20, height: 20)
-            button.setAccessibilityLabel("Azimuth Scribe")
+            button.setAccessibilityLabel("Local LLM Encoder")
         }
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
@@ -114,7 +114,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func makeMenu(retain: Bool = true) -> NSMenu {
-        let menu = NSMenu(title: "Azimuth Scribe")
+        let menu = NSMenu(title: "Local LLM Encoder")
         menu.autoenablesItems = false
         menu.delegate = self
         func item(_ title: String, _ selector: Selector?, tag: Int, key: String = "") {
@@ -185,8 +185,8 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.job = state?.runtime.job?.message ?? ""
         panel.failed = state?.runtime.job?.status == "error"
         for menu in menus { update(menu) }
-        statusItem?.button?.toolTip = operation ?? (connected ? "Azimuth Scribe · 실행 중" : "Azimuth Scribe · 서버 중지됨")
-        statusItem?.button?.image = NSImage(systemSymbolName: connected ? "mic.circle.fill" : "mic.circle", accessibilityDescription: "Azimuth Scribe")
+        statusItem?.button?.toolTip = operation ?? (connected ? "Local LLM Encoder · 실행 중" : "Local LLM Encoder · 서버 중지됨")
+        statusItem?.button?.image = NSImage(systemSymbolName: connected ? "mic.circle.fill" : "mic.circle", accessibilityDescription: "Local LLM Encoder")
         statusItem?.button?.image?.isTemplate = true
         statusItem?.button?.image?.size = NSSize(width: 20, height: 20)
     }
@@ -200,9 +200,15 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                              backing: .buffered, defer: false)
         window.contentViewController = host
         window.setContentSize(RecorderPanel.size)
-        window.title = "Azimuth Scribe"
+        window.title = "Local LLM Encoder"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        // An empty unified toolbar gives the 52pt title bar of modern Mac apps,
+        // so the panel's own controls sit on the same line as the traffic lights.
+        window.toolbar = NSToolbar(identifier: "scribe")
+        window.toolbarStyle = .unified
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = false
         window.isFloatingPanel = false
         window.hidesOnDeactivate = false
         window.becomesKeyOnlyIfNeeded = false
@@ -488,7 +494,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "Azimuth Scribe"
+        alert.messageText = "Local LLM Encoder"
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.addButton(withTitle: "확인")

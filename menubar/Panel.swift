@@ -45,12 +45,19 @@ struct RecorderPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
             header
-            if model.working || !model.notice.isEmpty || model.failed { statusLine }
+                .frame(height: 52)                  // matches the unified title bar
+                .padding(.leading, 92)              // clear the traffic-light buttons
+                .padding(.trailing, 14)
             Divider()
+            if model.working || !model.notice.isEmpty || model.failed {
+                statusLine.padding(.horizontal, 16).padding(.vertical, 6)
+                Divider()
+            }
             if model.connected {
                 WorkspacePane(workspace: workspace, page: model.screen == .settings ? "settings" : "workspace")
+                    .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 10)
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "power.circle").font(.system(size: 40)).foregroundStyle(.secondary)
@@ -59,7 +66,8 @@ struct RecorderPanel: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding(.horizontal, 16).padding(.bottom, 12).padding(.top, 30) // room for the transparent title bar
+        .ignoresSafeArea(.container, edges: .top)
+        .background(Color(nsColor: .textBackgroundColor).ignoresSafeArea()) // clean solid white / dark
         .frame(minWidth: 720, idealWidth: Self.size.width, maxWidth: .infinity,
                minHeight: 520, idealHeight: Self.size.height, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("scribe-panel")
@@ -69,15 +77,16 @@ struct RecorderPanel: View {
         HStack(spacing: 10) {
             if model.screen == .settings {
                 Button { model.screen = .workspace } label: {
-                    Label("설정", systemImage: "chevron.left").font(.headline)
-                }.buttonStyle(.plain)
+                    Image(systemName: "chevron.left").frame(width: 16)
+                }.help("작업 공간으로 돌아가기")
+                Text("설정").font(.system(size: 13, weight: .semibold))
             } else {
-                Label("Azimuth Scribe", systemImage: "waveform").font(.headline)
+                Text("Local LLM Encoder").font(.system(size: 13, weight: .semibold))
             }
             Spacer()
             if model.recording {
-                Text("● " + model.elapsed).foregroundStyle(.red).monospacedDigit()
-                ProgressView(value: model.level).frame(width: 80)
+                Text("● " + model.elapsed).font(.system(size: 12)).foregroundStyle(.red).monospacedDigit()
+                ProgressView(value: model.level).controlSize(.small).frame(width: 70)
             }
             Button(action: model.connected || model.recording ? model.record : model.start) {
                 Label(model.recording ? "녹음 종료하고 받아쓰기" : !model.connected ? "서버 시작" : model.pending ? "보관된 녹음 다시 저장" : "녹음 시작",
@@ -87,8 +96,8 @@ struct RecorderPanel: View {
             .tint(model.recording ? .red : .accentColor)
             .disabled(!model.recording && (model.busy || model.working))
             HStack(spacing: 5) {
-                Circle().fill(statusColor).frame(width: 7, height: 7)
-                Text(statusText).font(.caption).foregroundStyle(.secondary)
+                Circle().fill(statusColor).frame(width: 6, height: 6)
+                Text(statusText).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Menu {
                 Button("설정…") { model.screen = .settings }.disabled(!model.connected)
@@ -114,9 +123,10 @@ struct RecorderPanel: View {
         HStack {
             if model.working { ProgressView().controlSize(.small) }
             Text(model.notice.isEmpty ? model.job : model.notice)
-                .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
-            if model.working { Button("중단", action: model.cancel) }
+            if model.working { Button("중단", action: model.cancel).controlSize(.small) }
         }
     }
 }
+

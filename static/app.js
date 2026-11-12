@@ -347,8 +347,70 @@ async function openStorage(kind) {
   }
   $("storage-dialog").showModal();
 }
+// Batch correction: saved find→replace rules, applied to the current text on demand
+// and by the server to every new transcript and summary.
+function addReplaceRow(rule = {find: "", replace: ""}) {
+  const row = document.createElement("div"); row.className = "replace-rule";
+  const field = (cls, value, label, example) => {
+    const input = Object.assign(document.createElement("input"), {className: cls, value, placeholder: example, maxLength: 200});
+    input.setAttribute("aria-label", label); return input;
+  };
+  const find = field("replace-find", rule.find, "찾을 말", "예: 아울록");
+  const to = field("replace-to", rule.replace, "바꿀 말", "예: 아웃룩");
+  const arrow = Object.assign(document.createElement("span"), {className: "replace-arrow", textContent: "→"});
+  const remove = Object.assign(document.createElement("button"), {type: "button", className: "icon-button", innerHTML: icon("close")});
+  remove.setAttribute("aria-label", "규칙 삭제");
+  remove.onclick = () => { row.remove(); if (!$("replace-rules").children.length) addReplaceRow(); };
+  row.append(find, arrow, to, remove); $("replace-rules").append(row);
+  return find;
+}
+function openReplace() {
+  $("replace-rules").replaceChildren(); $("replace-error").hidden = true;
+  const rules = state?.replacements || [];
+  (rules.length ? rules : [undefined]).forEach(rule => addReplaceRow(rule));
+  $("replace-dialog").showModal();
+}
+async function saveReplaceRules() {
+  const rules = [...document.querySelectorAll(".replace-rule")]
+    .map(row => ({find: row.querySelector(".replace-find").value.trim(), replace: row.querySelector(".replace-to").value}))
+    .filter(rule => rule.find);
+  const saved = await api("/api/replacements", {method: "PUT", body: {rules}});
+  state.replacements = saved.rules; return saved.rules;
+}
+function replaceAction(callback) {
+  return async event => {
+    $("replace-error").hidden = true;
+    try { await callback(event); } catch (error) { $("replace-error").textContent = error.message; $("replace-error").hidden = false; }
+  };
+}
+function toastUndo(message, undo) {
+  toast(message); clearTimeout(toastTimer);
+  const button = Object.assign(document.createElement("button"), {type: "button", className: "toast-action", textContent: "되돌리기"});
+  button.onclick = action(async () => { $("toast").hidden = true; await undo(); });
+  $("toast").append(button);
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, 10000);
+}
+document.querySelectorAll("[data-open-replace]").forEach(button => button.addEventListener("click", openReplace));
+$("add-replace-rule").addEventListener("click", () => addReplaceRow().focus());
+$("save-replace").addEventListener("click", replaceAction(async () => {
+  await saveReplaceRules(); $("replace-dialog").close(); toast("일괄 수정 규칙을 저장했습니다.");
+}));
+$("replace-form").addEventListener("submit", replaceAction(async event => {
+  event.preventDefault();
+  if (isBusy()) throw new Error("작업이 끝난 뒤 일괄 수정하세요.");
+  const rules = await saveReplaceRules();
+  if (!rules.length) throw new Error("찾을 말을 하나 이상 입력하세요.");
+  await flushText();
+  const before = {transcript: $("transcript").value, summary: $("summary").value};
+  const result = await api("/api/replacements/apply", {method: "POST"});
+  $("replace-dialog").close(); await refresh();
+  if (!result.count) return toast("바꿀 곳이 없습니다. 규칙은 저장했습니다.");
+  toastUndo(`${result.count}곳을 고쳤습니다 (받아쓰기 ${result.transcript} · 요약 ${result.summary}).`, async () => {
+    await api("/api/text", {method: "PATCH", body: before}); await refresh(); toast("일괄 수정을 되돌렸습니다.");
+  });
+}));
 function showInfo(title, content) { $("info-title").textContent = title; $("info-content").innerHTML = content; $("info-dialog").showModal(); }
-$("help-button").onclick = () => showInfo("Azimuth Scribe 사용 방법", `
+$("help-button").onclick = () => showInfo("Local LLM Encoder 사용 방법", `
   <h3>1. 녹음하거나 파일 추가</h3><p>Start record를 눌러 마이크 권한을 허용한 뒤 대화를 녹음하세요. Stop record로 마치면 16 kHz 모노 WAV로 저장됩니다. 기존 파일은 Add로 여러 개를 추가할 수 있습니다.</p>
   <h3>2. 음성을 텍스트로 변환</h3><p>변환할 파일을 체크하고 STT를 누르세요. 선택 순서가 아닌 목록 순서대로 처리합니다. Stop을 누르면 현재 구간 처리 후 멈추며, 완료된 파일의 결과는 남습니다.</p>
   <h3>3. 받아쓰기 확인</h3><p>오인식된 이름, 숫자, 날짜 등을 직접 고치세요. 다른 곳에서 작성한 대화를 붙여 넣어 요약할 수도 있습니다.</p>
@@ -364,6 +426,7 @@ document.querySelectorAll("[data-action]").forEach(button => button.addEventList
   const name = button.dataset.action;
   if (name === "settings") return openSettings(); if (name === "prompts") return openPrompts();
   if (name === "results" || name === "recordings") return openStorage(name);
+  if (name === "replace") return openReplace();
   openSave(name === "save-transcript" ? "transcript" : "summary");
 })));
 

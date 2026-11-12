@@ -9,8 +9,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = Path.home() / "Library" / "Application Support" / "Azimuth Scribe Local"
-DEST = Path.home() / "Applications" / "Azimuth Scribe.app"
-BUILD = ROOT / "build" / "Azimuth Scribe.app"
+DEST = Path.home() / "Applications" / "Local LLM Encoder.app"
+BUILD = ROOT / "build" / "Local LLM Encoder.app"
 CONTENTS = BUILD / "Contents"
 MACOS = CONTENTS / "MacOS"
 RESOURCES = CONTENTS / "Resources"
@@ -41,7 +41,7 @@ receipt = {"source_path": str(ROOT), "runtime_path": str(RUNTIME)}
 receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
 
 info = {
-    "CFBundleName": "Azimuth Scribe", "CFBundleDisplayName": "Azimuth Scribe",
+    "CFBundleName": "Local LLM Encoder", "CFBundleDisplayName": "Local LLM Encoder",
     "CFBundleIdentifier": "net.realmi.azimuth-scribe.local",
     "CFBundleExecutable": "AzimuthScribe", "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": "1.0.0", "CFBundleVersion": "1",

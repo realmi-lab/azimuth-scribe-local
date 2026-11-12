@@ -1,53 +1,224 @@
-body[data-panel] {
+/* macOS-style theme for the menu-bar panel (the page is loaded with ?panel=…). */
+html:has(body[data-panel]) {
+  --text: rgb(0 0 0 / .85);
+  --secondary: rgb(0 0 0 / .5);
+  --tertiary: rgb(0 0 0 / .28);
+  --separator: rgb(0 0 0 / .1);
+  --control: #fff;
+  --control-hover: #f6f6f6;
+  --control-edge: rgb(0 0 0 / .14);
+  --field: #f5f5f7;
+  --field-solid: #f5f5f7;
+  --field-edge: rgb(0 0 0 / .08);
+  --group: rgb(0 0 0 / .035);
+  --zebra: rgb(0 0 0 / .03);
+  --sheet: #fff;
+  --accent: #007aff;
+  --red: #ff3b30;
+  --green: #28cd41;
+  --orange: #ff9500;
+  --focus: rgb(0 122 255 / .45);
   color-scheme: light dark;
-  font: 13px -apple-system, sans-serif;
   background: transparent;
-  color: CanvasText;
-  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
 }
-body[data-panel] :is(.app-header,.menu-bar,.record-panel,.workspace .panel,.localhost-label) { display:none }
-body[data-panel] .workspace, body[data-panel] .left-column { display:contents }
-body[data-panel="files"] .workspace .files-panel,
-body[data-panel="summary"] .workspace .summary-panel,
-body[data-panel="transcript"] .workspace .transcript-panel {
-  display:flex; flex-direction:column; gap:12px; min-height:0; padding:4px;
-  border:0; border-radius:0; background:transparent; box-shadow:none;
+@supports (color: AccentColor) { html:has(body[data-panel]) { --accent: AccentColor } }
+@media (prefers-color-scheme: dark) {
+  html:has(body[data-panel]) {
+    --text: rgb(255 255 255 / .86);
+    --secondary: rgb(255 255 255 / .55);
+    --tertiary: rgb(255 255 255 / .25);
+    --separator: rgb(255 255 255 / .1);
+    --control: rgb(255 255 255 / .12);
+    --control-hover: rgb(255 255 255 / .17);
+    --control-edge: rgb(255 255 255 / .06);
+    --field: #262628;
+    --field-solid: #262628;
+    --field-edge: rgb(255 255 255 / .09);
+    --group: rgb(255 255 255 / .04);
+    --zebra: rgb(255 255 255 / .035);
+    --sheet: #2c2c2e;
+    --accent: #0a84ff;
+    --red: #ff453a;
+    --green: #32d74b;
+    --orange: #ff9f0a;
+    --focus: rgb(10 132 255 / .55);
+  }
+  @supports (color: AccentColor) { html:has(body[data-panel]) { --accent: AccentColor } }
 }
-body[data-panel] .panel h2 { font:600 15px -apple-system,sans-serif; color:CanvasText }
-body[data-panel] .panel textarea {
-  box-sizing:border-box; margin:0; width:100%; height:52vh; min-height:110px;
-  padding:10px; line-height:1.55; resize:vertical; color:FieldText; background:Field;
-}
-body[data-panel] .summary-controls { flex-wrap:wrap; margin:0 }
-body[data-panel] .status-bar { position:static; margin-top:12px; padding:8px 4px; background:transparent; color:GrayText; font-size:11px }
-body[data-panel] .file-table-wrap { overflow:auto; max-height:54vh }
-body[data-panel] #panel-options:not([hidden]) { display:grid; gap:1px; border-radius:9px; overflow:hidden }
-body[data-panel] #panel-options button { padding:13px; text-align:left; border:0; color:CanvasText; background:color-mix(in srgb,CanvasText 7%,Canvas) }
-body[data-panel] #panel-options button::after { content:"›"; float:right; color:GrayText }
-body[data-panel] dialog { color-scheme:light; max-height:96vh; width:calc(100% - 8px) }
-body[data-panel] .dialog-body { padding:12px; overflow:auto }
-body[data-panel] .file-preview { max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere }
-body[data-panel] .file-table-wrap,body[data-panel] .button:not(.primary):not(.stop) { color-scheme:light }
-body[data-panel] .toast { bottom:8px }
 
-/* Large in-panel workspace: files + transcript on the left, summary on the right. */
-body[data-panel="workspace"] { margin:0; overflow:hidden }
+body[data-panel] {
+  margin: 0; min-width: 0; background: transparent; color: var(--text);
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo", sans-serif;
+  -webkit-font-smoothing: antialiased; letter-spacing: -.003em;
+  -webkit-user-select: none; user-select: none; cursor: default;
+}
+body[data-panel] :is(textarea, input, pre, .info-content) { -webkit-user-select: text; user-select: text }
+body[data-panel] :is(.app-header, .menu-bar, .record-panel, .workspace .panel, .localhost-label) { display: none }
+body[data-panel] .workspace, body[data-panel] .left-column { display: contents }
+
+/* ---------- Typography ---------- */
+body[data-panel] .panel h2 { font: 600 13px/1.3 -apple-system, sans-serif; color: var(--text); letter-spacing: 0 }
+body[data-panel] :is(.count-label, .editable-label, .text-count, .model-label) { color: var(--secondary); font-size: 11px }
+body[data-panel] .model-label { margin: 0 }
+
+/* ---------- Push buttons ---------- */
+body[data-panel] .button {
+  min-height: 24px; height: 24px; padding: 0 10px; gap: 5px; border: 0; border-radius: 6px;
+  background: var(--control); color: var(--text); font: 400 13px/1 -apple-system, sans-serif;
+  box-shadow: 0 0 0 .5px var(--control-edge), 0 .5px 1.5px rgb(0 0 0 / .12);
+  transition: none; min-width: 0;
+}
+body[data-panel] .button:hover:not(:disabled) { background: var(--control-hover); border: 0 }
+body[data-panel] .button:active:not(:disabled) { filter: brightness(.93) }
+body[data-panel] .button .icon { width: 13px; height: 13px; stroke-width: 1.8 }
+body[data-panel] .button.primary { color: #fff; background: var(--accent); box-shadow: 0 .5px 1.5px rgb(0 0 0 / .2) }
+body[data-panel] .button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.06) }
+body[data-panel] .button.stop { color: var(--red); background: var(--control) }
+body[data-panel] .button:disabled { opacity: .45 }
+body[data-panel] .footer-buttons { gap: 8px }
+body[data-panel] :is(.footer-buttons, .summary-panel .panel-footer, .dialog-footer) .button { min-width: 72px }
+body[data-panel] .icon-button { width: 24px; height: 24px; border-radius: 6px; color: var(--secondary) }
+body[data-panel] .icon-button:hover { background: var(--group); color: var(--text) }
+body[data-panel] :is(button, summary, a):focus-visible,
+body[data-panel] :is(input, textarea, select):focus { outline: none; box-shadow: 0 0 0 3.5px var(--focus) }
+
+/* ---------- Native popups & checkboxes ---------- */
+body[data-panel] select {
+  -webkit-appearance: menulist; appearance: auto; height: auto; min-height: 0; width: auto;
+  background: none; border: 0; padding: 0; color: var(--text); font: 13px -apple-system, sans-serif;
+}
+body[data-panel] input[type=checkbox] { accent-color: auto; width: 14px; height: 14px }
+
+/* ---------- Text fields & text views ---------- */
+body[data-panel] :is(input:not([type=checkbox]), .form-label textarea) {
+  min-height: 24px; height: 24px; padding: 3px 7px; border: 0; border-radius: 5px;
+  background: var(--field); color: var(--text); font: 13px -apple-system, sans-serif;
+  box-shadow: inset 0 0 0 .5px var(--field-edge), 0 .5px 0 rgb(255 255 255 / .04);
+}
+body[data-panel] .form-label textarea { height: auto; line-height: 1.55; padding: 7px 8px }
+body[data-panel] .panel textarea {
+  margin: 0; padding: 10px 12px; border: 0; border-radius: 8px; resize: none;
+  background: var(--field); color: var(--text); font: 13px/1.6 -apple-system, sans-serif;
+  box-shadow: inset 0 0 0 .5px var(--field-edge);
+}
+body[data-panel] .panel textarea::placeholder { color: var(--tertiary); font-size: 13px; line-height: 1.6 }
+body[data-panel] .panel textarea[readonly] { background: var(--group) }
+body[data-panel] :is(input, textarea):focus { box-shadow: inset 0 0 0 .5px var(--field-edge), 0 0 0 3.5px var(--focus) }
+
+/* ---------- Table view ---------- */
+body[data-panel] .file-actions { display: flex; gap: 8px; margin: 0 }
+body[data-panel] .file-table-wrap {
+  border: 0; border-radius: 8px; background: var(--field); overflow: auto;
+  box-shadow: inset 0 0 0 .5px var(--field-edge); min-height: 0;
+}
+body[data-panel] .file-table { font-size: 13px }
+body[data-panel] .file-table thead { background: var(--field-solid) }
+body[data-panel] .file-table th { height: 24px; padding: 0 8px; font-size: 11px; font-weight: 500; color: var(--secondary); border-bottom: .5px solid var(--separator) }
+body[data-panel] .file-table td { height: 26px; padding: 2px 8px; border: 0 }
+body[data-panel] .file-table tbody tr:nth-child(even) { background: var(--zebra) }
+body[data-panel] .file-table tbody tr:hover { background: var(--zebra) }
+body[data-panel] .filename { color: var(--text); font-size: 13px }
+body[data-panel] .duration { color: var(--secondary); font-size: 12px }
+body[data-panel] .file-status { font-size: 11px; color: var(--secondary) }
+body[data-panel] .file-status.Completed { color: var(--green) }
+body[data-panel] .file-status.Completed:before { background: var(--green) }
+body[data-panel] .file-status.Processing { color: var(--accent) }
+body[data-panel] .file-status.Processing:before { background: var(--accent) }
+body[data-panel] .file-status.Error { color: var(--red) }
+body[data-panel] .file-status.Error:before { background: var(--red) }
+body[data-panel] .empty-files { height: 90px; color: var(--secondary) }
+body[data-panel] .empty-files span, body[data-panel] .empty-files small { color: var(--tertiary) }
+body[data-panel] .empty-files > .icon { stroke: var(--tertiary) }
+body[data-panel] .dragging .drop-overlay { border: 2px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-size: 15px }
+
+/* ---------- Layout pieces ---------- */
+body[data-panel] .panel-title, body[data-panel] .panel-footer { min-height: 24px; gap: 8px }
+body[data-panel] .summary-controls { display: flex; flex-wrap: nowrap; gap: 8px; margin: 0 }
+body[data-panel] .summary-controls > label { font-size: 13px; color: var(--secondary) }
+body[data-panel] .summary-controls select { flex: 1; min-width: 120px; max-width: none }
+body[data-panel] .summary-controls .button { height: 24px; padding: 0 10px }
+body[data-panel] .status-bar {
+  position: static; min-height: 0; margin: 0; padding: 6px 2px 0; gap: 8px;
+  border-top: .5px solid var(--separator); background: transparent; color: var(--secondary); font-size: 11px;
+}
+body[data-panel] .status-dot { width: 6px; height: 6px }
+body[data-panel] .status-dot.ready { background: var(--green) }
+body[data-panel] .status-dot.error { background: var(--red) }
+body[data-panel] .status-dot.working { background: var(--accent) }
+body[data-panel] progress { width: 120px; height: 4px; accent-color: var(--accent) }
+body[data-panel] progress::-webkit-progress-bar { background: var(--separator) }
+body[data-panel] progress::-webkit-progress-value { background: var(--accent) }
+body[data-panel] .file-preview { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 ui-monospace, "SF Mono", monospace }
+
+/* ---------- HUD toast ---------- */
+body[data-panel] .toast {
+  bottom: 18px; padding: 8px 14px; border-radius: 10px; font-size: 12px; line-height: 1.5;
+  background: rgb(40 40 42 / .88); color: #fff; box-shadow: 0 8px 30px rgb(0 0 0 / .25), 0 0 0 .5px rgb(255 255 255 / .1);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6); backdrop-filter: blur(20px) saturate(1.6);
+}
+body[data-panel] .toast.error { background: rgb(150 30 40 / .9) }
+body[data-panel] .toast-action { border: 0; background: rgb(255 255 255 / .18); border-radius: 5px; padding: 2px 9px; font-size: 12px; font-weight: 500 }
+
+/* ---------- Sheets (dialogs) ---------- */
+body[data-panel] dialog {
+  color-scheme: light dark; width: min(560px, calc(100% - 40px)); max-height: 92vh;
+  border: 0; border-radius: 12px; padding: 0; background: var(--sheet); color: var(--text);
+  box-shadow: 0 0 0 .5px rgb(0 0 0 / .25), 0 22px 70px rgb(0 0 0 / .35);
+}
+body[data-panel] .settings-dialog { width: min(620px, calc(100% - 40px)) }
+body[data-panel] .small-dialog { width: min(400px, calc(100% - 40px)) }
+body[data-panel] dialog::backdrop { background: rgb(0 0 0 / .18); backdrop-filter: none }
+body[data-panel] .dialog-heading { padding: 16px 18px 6px; background: transparent; border: 0; align-items: flex-start }
+body[data-panel] .dialog-heading h2 { font-size: 13px; font-weight: 700; color: var(--text); letter-spacing: 0 }
+body[data-panel] .dialog-heading p { margin: 3px 0 0; font-size: 11px; color: var(--secondary) }
+body[data-panel] .dialog-body { padding: 10px 18px; overflow: auto; max-height: calc(92vh - 110px) }
+body[data-panel] .dialog-footer { padding: 10px 18px 16px; gap: 8px; background: transparent; border: 0 }
+body[data-panel] :is(legend, .section-label) { font-size: 13px; font-weight: 600; color: var(--text) }
+body[data-panel] legend small { color: var(--secondary) }
+body[data-panel] :is(.form-grid label, .form-label) { font-size: 12px; color: var(--secondary); gap: 5px }
+body[data-panel] :is(.field-note, .checkbox-label, .model-setup p, .data-location, .data-location code) { color: var(--secondary) }
+body[data-panel] :is(.system-status, .storage-list) { background: var(--group); border: 0; border-radius: 8px; box-shadow: inset 0 0 0 .5px var(--separator) }
+body[data-panel] .storage-list { padding: 0 12px }
+body[data-panel] .system-status-line { color: var(--secondary); font-size: 12px }
+body[data-panel] .model-setup { border-color: var(--separator) }
+body[data-panel] .storage-file { border-color: var(--separator); font-size: 13px }
+body[data-panel] .storage-file a { color: var(--accent); text-decoration: none }
+body[data-panel] .storage-file span, body[data-panel] .storage-empty { color: var(--secondary) }
+body[data-panel] .info-content { color: var(--text) }
+body[data-panel] .info-content h3 { color: var(--text); font-size: 13px }
+body[data-panel] .inline-error { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); border: 0; border-radius: 6px; font-size: 12px }
+body[data-panel] .section-label button { color: var(--accent) }
+body[data-panel] .replace-head { color: var(--secondary) }
+body[data-panel] .replace-rule input { height: 26px }
+body[data-panel] .replace-arrow { color: var(--tertiary) }
+
+/* ---------- Settings screen: grouped list ---------- */
+body[data-panel] #panel-options:not([hidden]) {
+  display: grid; margin: 4px 0 0; border-radius: 10px; overflow: hidden;
+  background: var(--group); box-shadow: inset 0 0 0 .5px var(--separator);
+}
+body[data-panel] #panel-options button {
+  padding: 10px 14px; text-align: left; border: 0; background: transparent; color: var(--text); font-size: 13px;
+  border-bottom: .5px solid var(--separator);
+}
+body[data-panel] #panel-options button:last-child { border-bottom: 0 }
+body[data-panel] #panel-options button:hover { background: var(--zebra) }
+body[data-panel] #panel-options button::after { content: "›"; float: right; color: var(--tertiary); font-size: 15px; line-height: 1 }
+
+/* ---------- Workspace layout: files + transcript left, summary right ---------- */
+body[data-panel="workspace"] { overflow: hidden }
 body[data-panel="workspace"] .workspace {
-  display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px;
-  height:calc(100vh - 34px); min-height:0; padding:0; margin:0; max-width:none;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px;
+  height: calc(100vh - 30px); min-height: 0; padding: 0; margin: 0; max-width: none;
 }
-body[data-panel="workspace"] .left-column { display:flex; flex-direction:column; gap:14px; min-height:0 }
-body[data-panel="workspace"] .workspace :is(.files-panel,.transcript-panel,.summary-panel) {
-  display:flex; flex-direction:column; gap:8px; min-height:0; padding:2px;
-  border:0; border-radius:0; background:transparent; box-shadow:none;
+body[data-panel="workspace"] .left-column { display: flex; flex-direction: column; gap: 16px; min-height: 0 }
+body[data-panel="workspace"] .workspace :is(.files-panel, .transcript-panel, .summary-panel) {
+  display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 0;
+  border: 0; border-radius: 0; background: transparent; box-shadow: none;
 }
-body[data-panel="workspace"] .workspace .files-panel { flex:0 0 auto }
-body[data-panel="workspace"] .workspace :is(.transcript-panel,.summary-panel) { flex:1 1 auto }
-body[data-panel="workspace"] .file-table-wrap { max-height:150px; min-height:0 }
-body[data-panel="workspace"] .panel textarea { flex:1; height:auto; min-height:90px; resize:none }
-body[data-panel="workspace"] .status-bar { margin-top:6px; padding:4px 2px }
-/* Secondary buttons are forced to the light scheme; give them matching light colors so labels stay visible in dark mode. */
-body[data-panel] .button:not(.primary):not(.stop) { color:#2b4660; background:#fff; border-color:#c4d0de }
-body[data-panel] .button:not(.primary):not(.stop) .icon { stroke:currentColor }
-html:has(body[data-panel]) { background:transparent }
-body[data-panel] .summary-controls select { color-scheme:light; color:#2b4660; background:#fff }
+body[data-panel="workspace"] .workspace .files-panel { flex: 0 0 auto }
+body[data-panel="workspace"] .workspace :is(.transcript-panel, .summary-panel) { flex: 1 1 auto }
+body[data-panel="workspace"] .file-table-wrap { max-height: 136px }
+body[data-panel="workspace"] .panel textarea { flex: 1; height: auto; min-height: 80px }
