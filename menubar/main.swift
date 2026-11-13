@@ -94,6 +94,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenLocked), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenLocked), name: NSWorkspace.willSleepNotification, object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenLocked), name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
+        panel.help = { [weak self] in self?.workspace.web.evaluateJavaScript("document.getElementById('help-button').click()") }
         window = makeWindow()
         let mainMenu = NSMenu()
         let appMenu = NSMenuItem()

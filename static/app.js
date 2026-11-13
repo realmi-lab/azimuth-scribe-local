@@ -95,9 +95,10 @@ function render() {
   else { $("job-progress").max = 1; $("job-progress").value = job.progress; }
   const jobKey = job ? `${job.id}:${job.status}` : "";
   if (jobKey && jobKey !== seenJob) {
-    if (job.status === "error") toast(job.message, true);
-    if (job.status === "completed" || job.status === "cancelled") toast(job.message);
+    const firstLook = !seenJob;
     seenJob = jobKey;
+    if (!firstLook && job.status === "error") toast(job.message, true);
+    if (!firstLook && (job.status === "completed" || job.status === "cancelled")) toast(job.message);
   }
   if ($("settings-dialog").open) renderSystemStatus();
 }
@@ -183,7 +184,14 @@ $("delete-button").addEventListener("click", action(async () => {
   await api("/api/files/remove", {method: "POST", body: {ids: (window.ScribeHistory?.visibleFiles() || state.files).filter(f => f.selected).map(f => f.id)}});
   toast("선택한 파일을 목록에서 제거했습니다. 디스크의 파일은 보관됩니다."); await refresh();
 }));
-$("clear-button").addEventListener("click", action(async () => { $("transcript").value = ""; queueText("transcript"); await flushText(); await refresh(); }));
+$("clear-button").addEventListener("click", action(async () => {
+  await flushText();
+  const previous = $("transcript").value, fileId = editingFileId;
+  $("transcript").value = ""; queueText("transcript"); await flushText(); await refresh();
+  toastUndo("받아쓰기를 비웠습니다.", async () => {
+    await api("/api/text", {method: "PATCH", body: {transcript: previous, file_id: fileId}}); await refresh(); toast("받아쓰기를 되돌렸습니다.");
+  });
+}));
 async function stopJob() { await api("/api/cancel", {method: "POST"}); await refresh(); }
 $("stt-button").addEventListener("click", action(async () => {
   if (isBusy()) return stopJob();
@@ -426,6 +434,15 @@ $("replace-form").addEventListener("submit", replaceAction(async event => {
     await refresh(); toast("일괄 수정을 되돌렸습니다.");
   });
 }));
+document.addEventListener("keydown", event => {
+  if (!(event.metaKey || event.ctrlKey) || document.querySelector("dialog[open]") || document.body.classList.contains("vault-locked")) return;
+  if (event.key === "Enter" && !$("summary-button").disabled) { event.preventDefault(); $("summary-button").click(); }
+  if (event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    const kind = document.activeElement === $("summary") ? "summary" : $("transcript").value.trim() ? "transcript" : "summary";
+    if ($(kind).value.trim()) openSave(kind);
+  }
+});
 function showInfo(title, content) { $("info-title").textContent = title; $("info-content").innerHTML = content; showDialog($("info-dialog")); }
 $("help-button").onclick = () => showInfo("Local LLM Encoder 사용 방법", `
   <h3>1. 녹음하거나 파일 추가</h3><p>녹음 시작을 눌러 마이크 권한을 허용한 뒤 대화를 녹음하세요. 녹음 종료로 마치면 16 kHz 모노 WAV로 저장됩니다. 기존 파일은 파일 추가로 여러 개를 추가할 수 있습니다.</p>

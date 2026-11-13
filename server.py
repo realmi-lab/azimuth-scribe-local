@@ -252,7 +252,7 @@ def ensure_whisper():
     if RT.model is not None and RT.model_key == key:
         return RT.model
     if not model_installed():
-        raise RuntimeError("Whisper 모델이 없습니다. Settings → Preferences에서 모델 준비를 눌러 주세요.")
+        raise RuntimeError("Whisper 모델이 없습니다. 설정의 모델 및 음성 인식 설정에서 모델 준비를 눌러 주세요.")
     from faster_whisper import WhisperModel
     import ctranslate2
 
@@ -612,7 +612,7 @@ def transcribe(file_id: str | None = None, body: TranscriptionRequest | None = N
         if not selected:
             raise HTTPException(400, "변환할 파일을 선택하세요.")
         if not model_installed():
-            raise HTTPException(400, "먼저 Settings에서 Whisper 모델을 준비하세요.")
+            raise HTTPException(400, "먼저 설정에서 Whisper 모델을 준비하세요.")
 
     def worker():
         model = ensure_whisper()
@@ -731,7 +731,7 @@ def summarize(body: SummaryRequest):
     if not status["connected"]:
         raise HTTPException(503, status["error"])
     if CONFIG.llm_model not in status["models"] or CONFIG.llm_model.endswith(":cloud"):
-        raise HTTPException(400, "선택한 로컬 요약 모델이 없습니다. Settings에서 모델을 준비하세요.")
+        raise HTTPException(400, "선택한 로컬 요약 모델이 없습니다. 설정에서 모델 준비를 눌러 주세요.")
     with local_client(5) as client:
         shown = client.post(OLLAMA + "/api/show", json={"model": CONFIG.llm_model})
         shown.raise_for_status()
@@ -892,7 +892,13 @@ class ReplacementUpdate(BaseModel):
 @app.put("/api/replacements")
 def save_replacements(body: ReplacementUpdate):
     global REPLACEMENTS
-    rules = [{"find": r.find.strip(), "replace": r.replace} for r in body.rules if r.find.strip()]
+    # One rule per search word: a later duplicate replaces the earlier one.
+    unique = {}
+    for r in body.rules:
+        if r.find.strip():
+            unique.pop(r.find.strip(), None)
+            unique[r.find.strip()] = r.replace
+    rules = [{"find": find, "replace": replace} for find, replace in unique.items()]
     with LOCK:
         REPLACEMENTS = rules
         write_json(DATA / "replacements.json", REPLACEMENTS)

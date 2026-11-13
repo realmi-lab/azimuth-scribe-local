@@ -29,6 +29,7 @@ final class PanelModel: ObservableObject {
     var cancel: () -> Void = {}
     var openFolder: (String) -> Void = { _ in }
     var quit: () -> Void = {}
+    var help: () -> Void = {}
     var lockVault: () -> Void = {}
 }
 
@@ -95,6 +96,8 @@ struct RecorderPanel: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(model.recording ? .red : .accentColor)
+            .keyboardShortcut("r", modifiers: .command)
+            .help(model.recording ? "녹음을 끝내고 받아쓰기 (⌘R)" : "녹음 시작 (⌘R)")
             .disabled(!model.recording && (model.busy || model.working || (model.connected && model.vaultLocked)))
             HStack(spacing: 5) {
                 Circle().fill(statusColor).frame(width: 6, height: 6)
@@ -104,6 +107,8 @@ struct RecorderPanel: View {
                 Button("보관함 잠그기", action: model.lockVault).disabled(model.vaultLocked || !model.connected)
                 Divider()
                 Button("설정…") { model.screen = .settings }.disabled(!model.connected)
+                    .keyboardShortcut(",", modifiers: .command)
+                Button("사용 방법") { model.help() }.disabled(!model.connected || model.vaultLocked)
                 Divider()
                 Button("녹음 폴더 열기") { model.openFolder("data/Recordings") }
                 Button("저장 결과 폴더 열기") { model.openFolder("data/Results") }
@@ -118,7 +123,8 @@ struct RecorderPanel: View {
                 Image(systemName: "ellipsis.circle")
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .accessibilityLabel("메뉴")
+            .accessibilityLabel("더 보기")
+            .help("설정, 폴더, 서버, 종료")
         }
     }
 
