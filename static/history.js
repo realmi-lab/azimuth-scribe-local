@@ -28,7 +28,7 @@ window.ScribeHistory = (() => {
     if (date.toDateString() === yesterday.toDateString()) return `어제 ${time}`;
     return `${date.getFullYear() === now.getFullYear() ? "" : `${date.getFullYear()}년 `}${date.getMonth() + 1}월 ${date.getDate()}일 ${time}`;
   }
-  const metaLine = file => [file.duration ? formatDuration(file.duration) : "", dateLabel(file.created)].filter(Boolean).join(" · ");
+  const metaLine = file => [file.duration ? formatDuration(file.duration) : "", dateLabel(file.created), file.stored_name ? "" : "녹음 파일 지움"].filter(Boolean).join(" · ");
   // What the user needs to know about one record, in their words.
   function fileState(file) {
     if (jobTarget() === file.id) return {kind: "working", text: state.runtime.job.stage === "stt" ? "받아쓰는 중…" : "요약하는 중…"};
@@ -48,8 +48,18 @@ window.ScribeHistory = (() => {
   function unloadAudio() {
     const audio = $("detail-audio");
     if (!audio.paused) audio.pause();
-    if (audio.dataset.id) { delete audio.dataset.id; audio.removeAttribute("src"); if (audio.readyState) audio.load(); }
+    if (audio.dataset.name) { delete audio.dataset.name; audio.removeAttribute("src"); if (audio.readyState) audio.load(); }
     audio.hidden = true;
+  }
+  // The player follows the open record: it appears with its recording and goes when that is deleted.
+  function syncAudio(file) {
+    const audio = $("detail-audio"), wanted = !$("detail-view").hidden && file?.stored_name ? file.stored_name : "";
+    if ((audio.dataset.name || "") === wanted) return;
+    unloadAudio();
+    if (!wanted) return;
+    audio.dataset.name = wanted; audio.hidden = false;
+    audio.src = `/api/download/recordings/${encodeURIComponent(wanted)}`;
+    audio.setAttribute("aria-label", displayName(file) + " 재생");
   }
   function view(editor) {
     if (!editor) unloadAudio();
@@ -72,12 +82,6 @@ window.ScribeHistory = (() => {
     if (id && !file) return;
     editingFileId = id; unloadAudio(); view(true);
     setTab(tab || (!id && !state?.summary?.trim() ? "transcript" : "summary"));
-    if (file) {
-      const audio = $("detail-audio");
-      audio.dataset.id = file.id; audio.hidden = false;
-      audio.src = `/api/download/recordings/${encodeURIComponent(file.stored_name)}`;
-      audio.setAttribute("aria-label", displayName(file) + " 재생");
-    }
     $("editor-save-status").textContent = "고치면 자동으로 저장됩니다";
     render();
     document.querySelector(".app-content").scrollTop = 0;
@@ -90,17 +94,14 @@ window.ScribeHistory = (() => {
     node.className = "history-card"; node.dataset.id = file.id;
     node.innerHTML = `<button class="card-main" type="button"><span class="card-top"><span class="card-title"></span><span class="card-meta"></span></span><span class="card-text"></span></button>
       <p class="card-error" role="status" hidden></p>
-      <div class="card-side"><span class="file-status" role="status"></span><button class="button card-run" type="button"></button><button class="icon-button card-remove" type="button" title="목록에서 지우기 · 암호화된 녹음 파일은 보관함에 남습니다" aria-label="이 기록을 목록에서 지우기">${icon("trash")}</button></div>`;
+      <div class="card-side"><span class="file-status" role="status"></span><button class="button card-run" type="button"></button><button class="icon-button card-remove" type="button" title="지우기… · 요약본과 녹음 파일 중에서 고릅니다" aria-label="이 기록 지우기">${icon("trash")}</button></div>`;
     const find = selector => node.querySelector(selector);
     find(".card-main").onclick = action(() => openEditor(file.id));
     find(".card-run").onclick = action(async () => {
       if (jobTarget() === file.id) return stopJob();
       await startSummary(file.id);
     });
-    find(".card-remove").onclick = action(async () => {
-      await flushText(); await api("/api/files/remove", {method: "POST", body: {ids: [file.id]}});
-      await refresh(); toast("목록에서 지웠습니다. 암호화된 녹음 파일은 보관함에 남아 있습니다.");
-    });
+    find(".card-remove").onclick = () => openDelete(file.id);
     return node;
   }
   function updateCard(node, file) {
@@ -118,7 +119,8 @@ window.ScribeHistory = (() => {
     node.classList.toggle("working", active);
     find(".card-error").hidden = !file.error || active; find(".card-error").textContent = file.error || "";
     const run = find(".card-run");
-    run.hidden = status.kind === "done";
+    // Nothing to run once it is summarised, or when neither a recording nor a transcript is left.
+    run.hidden = status.kind === "done" || (!file.stored_name && !file.transcript?.trim());
     if (active) setButton(run, "중단", "stop", true); else setButton(run, "요약하기", "spark");
     run.classList.toggle("primary", !active);
     run.disabled = active ? state.runtime.job.status === "stopping" : busy;
@@ -133,6 +135,7 @@ window.ScribeHistory = (() => {
     title.setAttribute("contenteditable", target && !isBusy() ? "plaintext-only" : "false");
     title.title = target ? "눌러서 이름을 바꿀 수 있습니다" : "";
     $("detail-description").textContent = target ? metaLine(target) : NOTES_HINT;
+    syncAudio(target);
     const failed = target?.error && jobTarget() !== target.id;
     $("detail-error").hidden = !failed; $("detail-error").textContent = failed ? target.error : "";
   }
@@ -254,6 +257,9 @@ window.ScribeHistory = (() => {
     $("pending-bar").hidden = isBusy() || !!$("history-search").value.trim() || pending.length < 2;
     $("pending-count").textContent = `아직 요약하지 않은 기록 ${pending.length}개`;
     $("summarize-all").title = `‘${currentPrompt()}’ 서식으로 차례로 요약합니다`;
+    const leftover = next.runtime.leftover;
+    $("leftover-bar").hidden = !leftover?.count || isBusy();
+    if (leftover?.count) $("leftover-text").textContent = `목록에 없는 예전 녹음 ${leftover.count}개(${(leftover.size / 1024 / 1024).toFixed(1)} MB)가 보관함에 남아 있습니다.`;
     for (const [id, card] of cards) {
       if (!next.files.some(file => file.id === id)) { card.remove(); cards.delete(id); }
     }

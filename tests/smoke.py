@@ -181,8 +181,11 @@ def main():
             prompts = state["prompts"] | {"사용자 서식": "대화에서 결정한 일만 정리하세요."}
             request("PUT", "/api/prompts", json={"prompts": prompts})
             request("PUT", "/api/settings", json=state["settings"] | {"temperature": 0.1})
-            request("POST", "/api/files/remove", json={"ids": [second["id"]]})
-            assert client.get(f"/api/download/recordings/{second['stored_name']}").status_code == 200
+            deleted = request("POST", "/api/files/delete", json={"id": second["id"], "summary": True, "audio": True})
+            assert deleted["removed"]
+            assert client.get(f"/api/download/recordings/{second['stored_name']}").status_code == 200   # kept while undo is offered
+            request("POST", "/api/files/purge", json={"undo": deleted["undo"]})
+            assert client.get(f"/api/download/recordings/{second['stored_name']}").status_code == 404
             before = request("GET", "/api/state")
             process.terminate(); process.wait(timeout=10)
             process = subprocess.Popen(server_command, env=env, stdout=log, stderr=log)
@@ -193,7 +196,7 @@ def main():
             assert after["transcript"] == before["transcript"] and after["summary"] == before["summary"]
             assert after["prompts"] == prompts and after["settings"]["temperature"] == 0.1
             assert len(after["files"]) == 1 and len(request("GET", "/api/storage/results")["files"]) == 2
-            print("PASS: remove from list, preserved recordings, settings/prompts/results survive restart", flush=True)
+            print("PASS: a deleted record takes its recording with it; settings/prompts/results survive restart", flush=True)
         finally:
             client.close()
             process.terminate()

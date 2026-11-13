@@ -5,7 +5,7 @@
   --surface: #fff; --canvas: #f4f4f4; --sidebar: #e9e9e9; --card: #fff;
   --separator: #d8d8d8; --field: #ededed; --field-edge: #ddd; --sheet: #f8f8f8;
   --control: #fff; --control-edge: #d2d2d2; --control-hover: #e8e8e8; --group: #e5e5e5;
-  --focus: #0084ff55; --red: #c93a3a; --success: #666;
+  --focus: #0084ff55; --red: #c93a3a; --danger: #c93a3a; --success: #666;
   margin: 0; min-width: 320px; height: 100dvh; overflow: hidden; background: var(--canvas); color: var(--text);
   font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo", sans-serif;
   -webkit-font-smoothing: antialiased; letter-spacing: -.015em; caret-color: var(--accent);
@@ -64,6 +64,8 @@
 .history-app .button.primary { background: var(--accent); color: #fff; border-color: transparent; font-weight: 600 }
 .history-app .button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08) }
 .history-app .button .icon { width: 14px; height: 14px }
+.history-app .button.danger { background: var(--danger); color: #fff; border-color: transparent; font-weight: 600 }
+.history-app .button.danger:hover:not(:disabled) { background: var(--danger); filter: brightness(1.08) }
 .history-app .button.stop { color: var(--red); background: var(--control); border-color: color-mix(in srgb, var(--red) 45%, var(--control-edge)) }
 .history-app .icon-button { width: 28px; height: 28px; display: grid; place-items: center; padding: 4px; border: 0; border-radius: 6px; background: transparent; color: var(--secondary) }
 .history-app .icon-button:hover:not(:disabled) { background: var(--group); color: var(--text) }
@@ -84,6 +86,8 @@
 .history-app .record-panel { display: flex; padding: 12px 14px; border: 1px solid var(--separator); border-radius: 12px; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; background: var(--card) }
 .history-app .record-indicator { display: flex; align-items: center; gap: 10px; min-width: 0 }.history-app .record-indicator strong { font-size: 13px }.history-app .record-subtitle { display: block; font-size: 11px; color: var(--secondary) }.history-app .record-time { font-size: 13px; color: var(--red); font-variant-numeric: tabular-nums }
 .history-app .pending-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 8px 8px 14px; margin-bottom: 12px; border-radius: 10px; background: var(--field); color: var(--secondary); font-size: 12px }
+.history-app .leftover-bar { margin: 18px 0 0 }
+.history-app .bar-actions { display: flex; gap: 8px; flex: 0 0 auto }
 .history-app .history-list { display: grid; gap: 10px }
 .history-app .history-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 14px; border: 1px solid var(--separator); border-radius: 14px; background: var(--card); padding: 4px 12px 4px 4px; min-width: 0 }
 .history-app .history-card:hover { border-color: color-mix(in srgb, var(--text) 28%, var(--separator)) }
@@ -170,6 +174,7 @@
 .history-app .detail-view { display: flex; flex-direction: column; min-height: 100% }
 .history-app .detail-header { display: grid; gap: 6px; margin-bottom: 16px; justify-items: start }
 .history-app .detail-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px; width: 100%; min-height: 34px }
+.history-app .detail-top { display: flex; align-items: center; justify-content: space-between; width: 100% }
 .history-app .back-button { display: flex; gap: 2px; align-items: center; border: 0; padding: 2px 6px 2px 0; margin-bottom: 4px; border-radius: 6px; background: transparent; color: var(--secondary); font-size: 12px }
 .history-app .back-button:hover { color: var(--text) }
 .history-app .back-button .icon { width: 15px; height: 15px }
@@ -217,6 +222,14 @@
 .history-app :is(.system-status, .file-preview) { background: var(--field); border-color: var(--separator) }
 .history-app :is(.section-label button, .setup-progress, .storage-file a, .info-content a) { color: var(--accent-ink) }
 .history-app :is(.model-setup, .storage-file, .info-content td) { border-color: var(--separator) }
+.history-app .delete-lead { margin: 0 0 12px; font-size: 13px; color: var(--secondary) }
+.history-app .choice { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; margin-bottom: 8px; border: 1px solid var(--separator); border-radius: 10px; background: transparent; cursor: pointer }
+.history-app .choice:has(input:disabled) { cursor: default; opacity: .55 }
+.history-app .choice input { margin-top: 3px; width: 15px; height: 15px }
+.history-app .choice span { display: grid; gap: 2px }
+.history-app .choice strong { font-size: 13px; font-weight: 600; color: var(--text) }
+.history-app .choice small { font-size: 12px; color: var(--secondary) }
+.history-app #confirm-message { margin: 0; font-size: 13px; line-height: 1.7; color: var(--text) }
 .history-app .inline-error { background: color-mix(in srgb, var(--red) 12%, transparent); border-color: color-mix(in srgb, var(--red) 35%, transparent); color: var(--red) }
 .history-app .file-preview { margin: 0 0 12px; padding: 12px 14px; border-radius: 8px; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, "SF Mono", monospace; color: var(--text) }
 .history-app .vault-gate { background: var(--canvas); color: var(--text) }.history-app .vault-card { background: var(--card); border: 1px solid var(--separator); padding: 30px; border-radius: 19px; box-shadow: 0 12px 60px #0000000a; width: min(460px, 100%) }.history-app .vault-card h1 { font-size: 22px }.history-app .vault-card p { color: var(--secondary); font-size: 12px }.history-app .vault-card .vault-auth-note { opacity: 1 }

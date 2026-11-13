@@ -91,7 +91,7 @@ async function main() {
   assert.equal($("pending-bar").hidden, true);
   assert.deepEqual([...$("prompt-select").options].map(option => option.value), ["일반 요약", "회의록"]);
   // One primary action per record replaced the old batch controls.
-  for (const id of ["select-all", "delete-button", "file-count", "confirm-dialog"]) assert.equal($(id), null, id);
+  for (const id of ["select-all", "delete-button", "file-count"]) assert.equal($(id), null, id);
   assert.equal(d.querySelector('.app-sidebar [data-action="replace"]'), null);
   assert.equal($("transcript-panel").querySelector("[data-open-replace]"), null);
   assert.equal(d.querySelectorAll("[data-open-replace]").length, 1);
@@ -240,6 +240,79 @@ async function main() {
   await until(() => card.querySelector(".card-title").textContent === "주간 회의", "renamed card");
   assert.equal((await fetch(base + "/api/download/recordings/" + (await readState()).files[0].stored_name, {headers: {Cookie: authCookie}})).headers.get("content-type"), "audio/x-wav");
   process.stdout.write("PASS: summary-first record page, in-place editing, copy and rename\n");
+
+  // Deleting: the written result and the recording file are chosen separately, each with undo.
+  const purged = [];
+  const plainFetch = w.fetch;
+  w.fetch = async (url, options = {}) => {
+    if (String(url) === "/api/files/purge") purged.push(JSON.parse(options.body).undo);
+    return plainFetch(url, options);
+  };
+  const fileNow = async id => (await readState()).files.find(f => f.id === id);
+  $("detail-delete").click();
+  assert.equal($("delete-dialog").open, true);
+  assert.ok($("delete-title").textContent.includes("주간 회의"));
+  assert.equal($("delete-summary").checked, true); assert.equal($("delete-audio").checked, true);
+  assert.ok($("delete-result").textContent.includes("목록에서 사라집니다"));
+  $("delete-summary").checked = false; $("delete-summary").dispatchEvent(new w.Event("change"));
+  $("delete-audio").checked = false; $("delete-audio").dispatchEvent(new w.Event("change"));
+  assert.equal($("delete-confirm").disabled, true, "something must be chosen");
+  // 1) only the written result: the recording stays and can be summarised again
+  $("delete-summary").checked = true; $("delete-summary").dispatchEvent(new w.Event("change"));
+  assert.ok($("delete-result").textContent.includes("녹음 파일은 남습니다"));
+  $("delete-form").dispatchEvent(new w.Event("submit", {bubbles: true, cancelable: true}));
+  await until(() => !$("delete-dialog").open && $("toast").textContent.includes("요약본을 지웠습니다"), "written result deleted");
+  let partial = await fileNow(fileId);
+  assert.equal(partial.summary, ""); assert.equal(partial.transcript, ""); assert.ok(partial.stored_name);
+  await until(() => $("summary").value === "" && $("summary-button").textContent.includes("요약하기"), "record is ready to summarise again");
+  assert.ok($("detail-audio").src.includes("/api/download/recordings/"));
+  $("toast").querySelector(".toast-action").click();
+  await until(async () => (await fileNow(fileId)).summary === "녹음별 요약 내용", "undo brings the written result back");
+  assert.equal((await fileNow(fileId)).transcript, "이 녹음만 수정합니다.");
+  // 2) only the recording file: the text stays, the player goes
+  const storedName = (await fileNow(fileId)).stored_name;
+  await until(() => $("summary").value === "녹음별 요약 내용", "restored summary shown");
+  $("detail-delete").click();
+  $("delete-summary").checked = false; $("delete-summary").dispatchEvent(new w.Event("change"));
+  assert.ok($("delete-result").textContent.includes("요약과 원문은 남습니다"));
+  $("delete-form").dispatchEvent(new w.Event("submit", {bubbles: true, cancelable: true}));
+  await until(() => $("toast").textContent.includes("녹음 파일을 지웠습니다"), "recording file deleted");
+  partial = await fileNow(fileId);
+  assert.equal(partial.stored_name, ""); assert.equal(partial.summary, "녹음별 요약 내용");
+  await until(() => $("detail-audio").hidden && !$("detail-audio").hasAttribute("src"), "player removed with the recording");
+  assert.ok($("detail-description").textContent.includes("녹음 파일 지움"));
+  $("tab-transcript").click(); assert.equal($("stt-button").hidden, true, "nothing left to transcribe"); $("tab-summary").click();
+  assert.equal((await fetch(base + "/api/download/recordings/" + storedName, {headers: {Cookie: authCookie}})).status, 200, "kept for undo");
+  $("toast").querySelector(".toast-action").click();
+  await until(async () => (await fileNow(fileId)).stored_name === storedName, "undo brings the recording back");
+  await until(() => !$("detail-audio").hidden, "player is back");
+  // 3) both: the record leaves the list; undo puts it back in place
+  $("detail-delete").click();
+  assert.equal($("delete-summary").checked, true); assert.equal($("delete-audio").checked, true);
+  $("delete-form").dispatchEvent(new w.Event("submit", {bubbles: true, cancelable: true}));
+  await until(() => $("toast").textContent.includes("기록을 지웠습니다") && !$("history-view").hidden, "whole record deleted, back on the list");
+  assert.equal(await fileNow(fileId), undefined);
+  await until(() => !cardOf(fileId), "card removed");
+  $("toast").querySelector(".toast-action").click();
+  await until(async () => (await readState()).files[0]?.id === fileId, "undo restores the record in its place");
+  await until(() => cardOf(fileId), "card is back");
+  // A second recording with nothing written: only the recording can be chosen, and it is gone for good afterwards.
+  const extra = await addFile("지울녹음.wav");
+  w.dispatchEvent(new w.Event("hashchange"));
+  await until(() => cardOf(extra.id), "extra recording");
+  cardOf(extra.id).querySelector(".card-remove").click();
+  assert.equal($("delete-summary").disabled, true); assert.equal($("delete-audio").checked, true);
+  $("delete-form").dispatchEvent(new w.Event("submit", {bubbles: true, cancelable: true}));
+  await until(() => !cardOf(extra.id), "recording-only record deleted");
+  const lastUndo = (await (await fetch(base + "/api/files/delete", {method: "POST", headers: {...send, "Content-Type": "application/json"}, body: JSON.stringify({id: extra.id, audio: true})})).json());
+  assert.equal(lastUndo.detail, "기록을 찾을 수 없습니다.");
+  await fetch(base + "/api/files/purge", {method: "POST", headers: {...send, "Content-Type": "application/json"}, body: JSON.stringify({undo: "none"})});
+  assert.equal((await fetch(base + "/api/download/recordings/" + extra.stored_name, {headers: {Cookie: authCookie}})).status, 200, "undo window still open");
+  w.fetch = plainFetch;
+  assert.deepEqual(purged, [], "nothing is finished while the undo offer is showing");
+  card.querySelector(".card-main").click();
+  await until(() => !$("detail-view").hidden && $("detail-title").textContent === "주간 회의", "record reopened");
+  process.stdout.write("PASS: delete the written result, the recording file or both, each with undo\n");
 
   await setText({file_id: secondFile.id, transcript: "다른 녹음 원문", summary: "녹음별 요약 내용"});
   await setText({summary: "녹음별 요약 내용"});

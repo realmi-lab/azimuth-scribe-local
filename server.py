@@ -137,7 +137,7 @@ def load_private():
     for item in STATE["files"]:
         if item["status"] == "Processing":
             item["status"] = "Pending"
-        if not item.get("created"):
+        if not item.get("created") and item.get("stored_name"):
             # Recordings added before dates were kept: use when the stored audio was written.
             try:
                 item["created"] = int(VAULT.encrypted(RECORDINGS / item["stored_name"]).stat().st_mtime)
@@ -146,8 +146,44 @@ def load_private():
     persist()
 
 
+UNDO_SECONDS = 30   # deleted parts are kept this long so "되돌리기" can bring them back
+
+
+def recording_file(name):
+    """Encrypted file of a stored recording; None when the name is empty or leaves the Recordings folder."""
+    path = (RECORDINGS / name).resolve() if name else None
+    return VAULT.encrypted(path) if path and path.parent == RECORDINGS else None
+
+
+def purge_trash(older_than=UNDO_SECONDS, undo=None):
+    """Make deletions final: drop the undo copies and delete their audio. The caller holds LOCK.
+
+    With `undo`, only that deletion is finished; otherwise every deletion older than `older_than` seconds.
+    """
+    now, keep = time.time(), []
+    for entry in STATE.get("trash", []):
+        if entry["undo"] == undo if undo else now - entry["removed"] >= older_than:
+            target = recording_file(entry["audio"])
+            if target:
+                target.unlink(missing_ok=True)
+        else:
+            keep.append(entry)
+    if len(keep) != len(STATE.get("trash", [])):
+        STATE["trash"] = keep
+        persist()
+
+
+def leftover_recordings():
+    """Stored recordings no record points at. Older versions only took a record off the list."""
+    used = {f.get("stored_name") for f in STATE["files"]} | {e["item"].get("stored_name") for e in STATE.get("trash", [])}
+    return [path for path in RECORDINGS.iterdir()
+            if path.is_file() and path.name.endswith(".enc") and not path.name.startswith(".") and path.name[:-4] not in used]
+
+
 def finish_lock():
     global STATE, PROMPTS, REPLACEMENTS
+    if VAULT._key is not None and STATE.get("trash"):
+        purge_trash(0)   # nothing deleted may outlive the session that deleted it
     VAULT.lock()
     STATE = copy.deepcopy(EMPTY_STATE)
     PROMPTS = copy.deepcopy(DEFAULT_PROMPTS)
@@ -357,6 +393,8 @@ async def lifespan(_app):
         while True:
             await asyncio.sleep(1)
             with LOCK:
+                if VAULT.unlocked and STATE.get("trash") and not busy():
+                    purge_trash()
                 if VAULT.unlocked and not busy() and time.monotonic() - VAULT.last_activity >= IDLE_SECONDS:
                     request_lock()
     native_channel.start()
@@ -505,10 +543,13 @@ def model_setup_status():
 def get_state(refresh: bool = False):
     status = ollama_status(force=refresh)
     with LOCK:
-        return {**copy.deepcopy(STATE), "settings": CONFIG.model_dump(), "prompts": copy.deepcopy(PROMPTS),
+        leftover = leftover_recordings()
+        return {**copy.deepcopy({key: value for key, value in STATE.items() if key != "trash"}),
+                "settings": CONFIG.model_dump(), "prompts": copy.deepcopy(PROMPTS),
                 "replacements": copy.deepcopy(REPLACEMENTS),
                 "runtime": {"job": copy.deepcopy(RT.job), "stt": {**RT.model_status, "installed": model_installed()},
                             "ollama": status, "platform": platform.system(), "data_path": str(DATA),
+                            "leftover": {"count": len(leftover), "size": sum(path.stat().st_size for path in leftover)},
                             "whisper_models": list(WHISPER_MODELS), "qwen_models": list(QWEN_MODELS)}}
 
 
@@ -541,9 +582,10 @@ def update_text(body: TextUpdate):
     return {"ok": True}
 
 
-def audio_duration(path):
+def audio_duration(source):
+    """Length in seconds of an audio file given as a path or an open reader; None when unreadable."""
     try:
-        with av.open(str(path)) as container:
+        with av.open(source if hasattr(source, "read") else str(source)) as container:
             if not container.streams.audio:
                 raise ValueError("오디오 트랙이 없습니다.")
             if container.duration is not None:
@@ -654,13 +696,97 @@ def select_files(body: FileSelection):
     return {"ok": True}
 
 
-@app.post("/api/files/remove")
-def remove_files(body: FileSelection):
+class DeleteRequest(BaseModel):
+    id: str
+    summary: bool = False   # the written result: summary and transcript
+    audio: bool = False     # the recording file
+
+
+@app.post("/api/files/delete")
+def delete_parts(body: DeleteRequest):
+    """Delete a record's written result, its recording file, or both. A record with nothing left leaves the list."""
     with LOCK:
         require_idle()
-        STATE["files"] = [f for f in STATE["files"] if f["id"] not in body.ids]
+        index = next((i for i, f in enumerate(STATE["files"]) if f["id"] == body.id), None)
+        if index is None:
+            raise HTTPException(404, "기록을 찾을 수 없습니다.")
+        item = STATE["files"][index]
+        written = lambda: bool(item.get("transcript", "").strip() or item.get("summary", "").strip())
+        drop_text, drop_audio = body.summary and written(), body.audio and bool(item.get("stored_name"))
+        if not drop_text and not drop_audio:
+            raise HTTPException(400, "지울 항목을 고르세요.")
+        entry = {"undo": uuid.uuid4().hex, "removed": time.time(), "index": index, "item": copy.deepcopy(item),
+                 "audio": item["stored_name"] if drop_audio else ""}
+        if drop_text:
+            item.update(transcript="", summary="", status="Pending", error=None)
+        if drop_audio:
+            item["stored_name"] = ""
+        removed = not item["stored_name"] and not written()
+        if removed:
+            del STATE["files"][index]
+        STATE.setdefault("trash", []).append(entry)
+        persist()
+    return {"ok": True, "undo": entry["undo"], "removed": removed}
+
+
+class UndoRequest(BaseModel):
+    undo: str = Field(min_length=1, max_length=64)
+
+
+@app.post("/api/files/restore")
+def restore_deleted(body: UndoRequest):
+    with LOCK:
+        entry = next((e for e in STATE.get("trash", []) if e["undo"] == body.undo), None)
+        if entry is None:
+            raise HTTPException(410, "되돌릴 수 있는 시간이 지났습니다.")
+        current = next((i for i, f in enumerate(STATE["files"]) if f["id"] == entry["item"]["id"]), None)
+        if current is not None:
+            require_idle()   # a running job may be writing to this record; the undo copy waits for it
+        STATE["trash"].remove(entry)
+        if current is None:
+            STATE["files"].insert(min(entry["index"], len(STATE["files"])), entry["item"])
+        else:
+            STATE["files"][current] = entry["item"]
         persist()
     return {"ok": True}
+
+
+@app.post("/api/files/purge")
+def finish_deletion(body: UndoRequest):
+    """Called when the undo offer has gone; otherwise the deletion is finished after UNDO_SECONDS."""
+    with LOCK:
+        purge_trash(undo=body.undo)
+    return {"ok": True}
+
+
+class LeftoverRequest(BaseModel):
+    action: Literal["restore", "delete"]
+
+
+@app.post("/api/files/leftover")
+def handle_leftover(body: LeftoverRequest):
+    """Recordings an older version left in the vault: put them back on the list, or delete them for good."""
+    with LOCK:
+        require_idle()
+        files = leftover_recordings()
+        for path in files:
+            if body.action == "delete":
+                path.unlink(missing_ok=True)
+                continue
+            name, created = path.name[:-4], int(path.stat().st_mtime)
+            try:
+                with VAULT.open(RECORDINGS / name) as audio:
+                    duration = audio_duration(audio)
+            except Exception:
+                duration = None
+            label = time.strftime("%Y-%m-%d %H.%M", time.localtime(created)) + " 녹음" + Path(name).suffix
+            STATE["files"].append({"id": uuid.uuid4().hex, "name": label, "stored_name": name, "duration": duration,
+                                   "created": created, "status": "Pending", "selected": False, "error": None,
+                                   "transcript": "", "summary": ""})
+        if body.action == "restore":
+            STATE["files"].sort(key=lambda f: f.get("created") or 0)
+            persist()
+    return {"ok": True, "count": len(files)}
 
 
 class TranscriptionRequest(BaseModel):
@@ -726,6 +852,8 @@ def transcribe(file_id: str | None = None, body: TranscriptionRequest | None = N
             selected = [f for f in STATE["files"] if f["selected"]]
         if not selected:
             raise HTTPException(400, "받아쓸 기록을 선택하세요.")
+        if any(not f.get("stored_name") for f in selected):
+            raise HTTPException(400, "녹음 파일을 지운 기록은 다시 받아쓸 수 없습니다.")
         if not model_installed():
             raise HTTPException(400, "음성 인식 모델이 아직 없습니다. 설정에서 ‘모델 준비’를 눌러 주세요.")
 
@@ -976,7 +1104,10 @@ def summarize(body: SummaryRequest):
                 summary_parts(target.get("transcript", "").strip())
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
-        if any(t is not STATE and not t.get("transcript", "").strip() for t in targets) and not model_installed():
+        untranscribed = [t for t in targets if t is not STATE and not t.get("transcript", "").strip()]
+        if any(not t.get("stored_name") for t in untranscribed):
+            raise HTTPException(400, "녹음 파일도 원문도 없어 요약할 내용이 없습니다.")
+        if untranscribed and not model_installed():
             raise HTTPException(400, "음성 인식 모델이 아직 없습니다. 설정에서 ‘모델 준비’를 눌러 주세요.")
         STATE["last_prompt"] = body.prompt
     raw_qwen = summary_model()
@@ -1221,7 +1352,7 @@ def export_result(body: ExportRequest):
 def storage_files(kind: Literal["recordings", "results"]):
     folder = RECORDINGS if kind == "recordings" else RESULTS
     with LOCK:
-        names = {f["stored_name"]: f["name"] for f in STATE["files"]}
+        names = {f["stored_name"]: f["name"] for f in STATE["files"] if f.get("stored_name")}
     return {"files": [{"filename": p.name[:-4], "name": names.get(p.name[:-4], p.name[:-4]), "size": p.stat().st_size,
                        "modified": int(p.stat().st_mtime),
                        "url": f"/api/download/{kind}/{p.name[:-4]}"} for p in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)

@@ -102,10 +102,11 @@
           <div id="no-search-results" class="search-empty" hidden><svg class="icon"><use href="#i-search"/></svg><strong>검색 결과가 없습니다</strong><span>다른 제목이나 내용으로 검색해 보세요.</span></div>
         </div>
       </div>
+      <div class="pending-bar leftover-bar" id="leftover-bar" hidden><span id="leftover-text"></span><span class="bar-actions"><button id="leftover-restore" class="button" type="button">목록에 다시 넣기</button><button id="leftover-delete" class="button" type="button">완전히 삭제</button></span></div>
     </section>
     <section id="detail-view" class="detail-view" hidden aria-labelledby="detail-title">
       <header class="detail-header">
-        <button id="back-to-history" class="back-button"><svg class="icon"><use href="#i-back"/></svg>기록</button>
+        <div class="detail-top"><button id="back-to-history" class="back-button"><svg class="icon"><use href="#i-back"/></svg>기록</button><button id="detail-delete" class="icon-button" type="button" title="지우기…" aria-label="이 기록 지우기"><svg class="icon"><use href="#i-trash"/></svg></button></div>
         <h1 id="detail-title" spellcheck="false">전체 메모</h1>
         <div class="detail-meta"><p id="detail-description"></p><audio id="detail-audio" controls preload="metadata" hidden></audio></div>
         <p id="detail-error" class="card-error" role="status" hidden></p>
@@ -171,6 +172,17 @@
   <div class="dialog-body"><div class="replace-head"><span>찾을 말</span><span></span><span>바꿀 말</span><span></span></div><div id="replace-rules" class="replace-rules"></div><button type="button" class="button" id="add-replace-rule">+ 규칙 추가</button><p class="field-note">띄어쓰기가 달라도 찾습니다. 예: ‘슬라시크레이트’ 규칙은 ‘슬라시 크레이트’도 바꿉니다.<br>저장한 규칙은 다음에 이 창을 열 때 불러옵니다.</p><div id="replace-error" class="inline-error" role="alert" hidden></div></div>
   <div class="dialog-footer"><button type="button" class="button" data-close>닫기</button><button type="button" class="button" id="save-replace">규칙만 저장</button><button type="submit" class="button primary">이 요약에 적용</button></div>
 </form></dialog>
+<dialog id="delete-dialog" class="small-dialog"><form id="delete-form">
+  <div class="dialog-heading"><h2 id="delete-title">지우기</h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div>
+  <div class="dialog-body">
+    <p class="delete-lead">무엇을 지울지 고르세요. 하나만 지워도 되고 둘 다 지워도 됩니다.</p>
+    <label class="choice"><input type="checkbox" id="delete-summary"><span><strong>요약본</strong><small id="delete-summary-note">요약과 받아쓴 원문을 지웁니다.</small></span></label>
+    <label class="choice"><input type="checkbox" id="delete-audio"><span><strong>녹음 파일</strong><small id="delete-audio-note">음성 파일을 지웁니다.</small></span></label>
+    <p class="field-note" id="delete-result" role="status"></p>
+  </div>
+  <div class="dialog-footer"><button type="button" class="button" data-close>취소</button><button type="submit" class="button danger" id="delete-confirm">지우기</button></div>
+</form></dialog>
+<dialog id="confirm-dialog" class="small-dialog"><div class="dialog-heading"><h2 id="confirm-title"></h2></div><div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button class="button" id="confirm-no" type="button">취소</button><button class="button danger" id="confirm-yes" type="button"></button></div></dialog>
 <dialog id="info-dialog"><div class="dialog-heading"><h2 id="info-title"></h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body info-content" id="info-content"></div><div class="dialog-footer"><button class="button" data-close>닫기</button></div></dialog>
 </body>
 </html>

@@ -79,7 +79,8 @@ function renderActions() {
   $("summary-button").disabled = mine ? stopping : busy || (!isFile && !hasText);
   $("summary-button").title = elsewhere || (mine ? "진행 중인 작업을 멈춥니다" : !isFile && !hasText ? "원문 탭에 글을 붙여 넣으면 요약할 수 있습니다."
     : hasText ? "고른 서식으로 요약합니다 (⌘⏎)" : "받아쓰기부터 요약까지 한 번에 진행합니다 (⌘⏎)");
-  $("stt-button").hidden = !isFile;
+  $("stt-button").hidden = !isFile || !editorSource().stored_name;   // no recording file, nothing to transcribe
+  $("detail-delete").hidden = !isFile; $("detail-delete").disabled = busy;
   if (mine) setButton($("stt-button"), "중단", "stop", true);
   else setButton($("stt-button"), hasText ? "다시 받아쓰기" : "받아쓰기", "repeat");
   $("stt-button").disabled = mine ? stopping : busy;
@@ -450,13 +451,75 @@ function replaceAction(callback) {
     try { await callback(event); } catch (error) { $("replace-error").textContent = error.message; $("replace-error").hidden = false; }
   };
 }
-function toastUndo(message, undo) {
+// `expired` runs when the offer goes away unused (the deletion can then be made final).
+function toastUndo(message, undo, expired) {
   toast(message); clearTimeout(toastTimer);
   const button = Object.assign(document.createElement("button"), {type: "button", className: "toast-action", textContent: "되돌리기"});
-  button.onclick = action(async () => { $("toast").hidden = true; await undo(); });
+  button.onclick = action(async () => { clearTimeout(toastTimer); $("toast").hidden = true; await undo(); });
   $("toast").append(button);
-  toastTimer = setTimeout(() => { $("toast").hidden = true; }, 10000);
+  toastTimer = setTimeout(() => { $("toast").hidden = true; expired?.(); }, 10000);
 }
+function confirmAction(title, message, label) {
+  $("confirm-title").textContent = title; $("confirm-message").textContent = message; $("confirm-yes").textContent = label;
+  showDialog($("confirm-dialog"));
+  return new Promise(resolve => {
+    const finish = answer => { $("confirm-dialog").close(); resolve(answer); };
+    $("confirm-yes").onclick = () => finish(true); $("confirm-no").onclick = () => finish(false);
+    $("confirm-dialog").oncancel = () => resolve(false);
+  });
+}
+
+// Deleting: the written result (summary and transcript) and the recording file are chosen separately.
+let deleteTarget = null;
+const hasWritten = file => !!(file?.transcript?.trim() || file?.summary?.trim());
+function updateDeleteChoice() {
+  const file = state?.files.find(item => item.id === deleteTarget);
+  const text = $("delete-summary").checked, audio = $("delete-audio").checked;
+  const textLeft = hasWritten(file) && !text, audioLeft = !!file?.stored_name && !audio;
+  $("delete-confirm").disabled = !text && !audio;
+  $("delete-result").textContent = !text && !audio ? "지울 것을 하나 이상 고르세요."
+    : !textLeft && !audioLeft ? "남는 것이 없어 이 기록은 목록에서 사라집니다."
+    : audioLeft ? "녹음 파일은 남습니다. ‘요약하기’로 다시 정리할 수 있습니다."
+    : "요약과 원문은 남습니다. 음성은 다시 듣거나 받아쓸 수 없습니다.";
+}
+function openDelete(id) {
+  const file = state?.files.find(item => item.id === id);
+  if (!file) return;
+  if (isBusy()) return toast("작업이 끝난 뒤 지울 수 있습니다.");
+  deleteTarget = id;
+  const written = hasWritten(file), audio = !!file.stored_name;
+  $("delete-title").textContent = `‘${displayName(file)}’ 지우기`;
+  $("delete-summary").disabled = !written; $("delete-summary").checked = written;
+  $("delete-audio").disabled = !audio; $("delete-audio").checked = audio;
+  $("delete-summary-note").textContent = written ? "요약과 받아쓴 원문을 지웁니다." : "아직 요약이나 원문이 없습니다.";
+  $("delete-audio-note").textContent = audio ? "음성 파일을 지웁니다." : "녹음 파일은 이미 지웠습니다.";
+  updateDeleteChoice(); showDialog($("delete-dialog"));
+}
+for (const id of ["delete-summary", "delete-audio"]) $(id).addEventListener("change", updateDeleteChoice);
+$("delete-form").addEventListener("submit", action(async event => {
+  event.preventDefault();
+  const id = deleteTarget, summary = $("delete-summary").checked, audio = $("delete-audio").checked;
+  await flushText();
+  const result = await api("/api/files/delete", {method: "POST", body: {id, summary, audio}});
+  $("delete-dialog").close();
+  if (result.removed && editingFileId === id) await window.ScribeHistory.showHistory();
+  await refresh();
+  toastUndo(result.removed ? "기록을 지웠습니다." : summary ? "요약본을 지웠습니다." : "녹음 파일을 지웠습니다.", async () => {
+    await api("/api/files/restore", {method: "POST", body: {undo: result.undo}}); await refresh(); toast("되돌렸습니다.");
+  }, () => api("/api/files/purge", {method: "POST", body: {undo: result.undo}}).catch(() => {}));
+}));
+$("detail-delete").addEventListener("click", () => openDelete(editingFileId));
+// Recordings an older version left behind when a record was only taken off the list.
+$("leftover-restore").addEventListener("click", action(async () => {
+  const result = await api("/api/files/leftover", {method: "POST", body: {action: "restore"}});
+  await refresh(); toast(`예전 녹음 ${result.count}개를 목록에 다시 넣었습니다.`);
+}));
+$("leftover-delete").addEventListener("click", action(async () => {
+  const count = state?.runtime.leftover?.count || 0;
+  if (!await confirmAction("예전 녹음 완전히 삭제", `목록에 없는 예전 녹음 ${count}개를 완전히 삭제합니다. 삭제한 뒤에는 되돌릴 수 없습니다.`, "완전히 삭제")) return;
+  const result = await api("/api/files/leftover", {method: "POST", body: {action: "delete"}});
+  await refresh(); toast(`예전 녹음 ${result.count}개를 완전히 삭제했습니다.`);
+}));
 document.querySelectorAll("[data-open-replace]").forEach(button => button.addEventListener("click", openReplace));
 $("add-replace-rule").addEventListener("click", () => addReplaceRow().focus());
 $("save-replace").addEventListener("click", replaceAction(async () => {
@@ -499,6 +562,7 @@ $("help-button").onclick = () => showInfo("사용 방법", `
   <h3>2. 요약하기</h3><p>서식(일반 요약, 회의록 등)을 고르고 ‘요약하기’를 누르세요. 받아쓰기와 요약을 차례로 한 번에 진행합니다. 긴 회의는 자동으로 여러 구간으로 나눠 정리한 뒤 하나로 합칩니다.</p>
   <h3>3. 바로 고치기</h3><p>요약은 보이는 자리에서 바로 고칠 수 있고, 고친 내용은 자동으로 저장됩니다. ‘원문’ 탭에서는 받아쓴 글을 확인하고 고칠 수 있습니다. 원문을 고친 뒤 ‘다시 요약’을 누르면 고친 내용으로 새로 요약합니다. 자주 틀리는 낱말은 ‘일괄 수정’으로 한꺼번에 바꾸세요.</p>
   <h3>4. 내보내기</h3><p>‘복사’로 다른 앱에 붙여 넣거나, ‘파일로 저장…’으로 TXT·Markdown 파일을 만드세요. 저장한 파일은 왼쪽 ‘저장한 파일’에서 다시 볼 수 있습니다. 암호화하지 않은 일반 파일이 필요하면 저장 창에서 ‘일반 파일도 내보내기’를 선택하세요.</p>
+  <h3>지우기</h3><p>휴지통 버튼을 누르면 ‘요약본’(요약과 원문)과 ‘녹음 파일’ 중에서 지울 것을 고릅니다. 하나만 지워도 되고 둘 다 지워도 됩니다. 둘 다 지우면 기록이 목록에서 사라집니다. 지운 직후에는 ‘되돌리기’로 살릴 수 있고, 그 뒤에는 완전히 삭제됩니다.</p>
   <h3>목록과 달력</h3><p>기록 화면 위쪽의 ‘목록 / 달력’으로 보기 방식을 바꿉니다. 달력은 녹음이 많은 날일수록 진한 색으로 보여 주고, 주황색 점은 그날 저장한 파일이 있다는 표시입니다. 날짜를 누르면 그날의 녹음과 저장한 파일이 나옵니다.</p>
   <h3>전체 메모</h3><p>받아쓴 원문이 차례로 모이는 곳입니다. 여러 녹음을 한데 모아 요약하거나, 다른 곳의 글을 붙여 넣어 요약할 때 씁니다.</p>
   <h3>보관함 잠금</h3><p>녹음과 글은 암호화해 보관하며 Mac 앱에서 Touch ID 또는 Mac 로그인 암호로만 엽니다. 암호는 macOS 인증창에서 입력하며 별도 앱 비밀번호는 없습니다. 5분 동안 쓰지 않으면 자동으로 잠깁니다. 백업에는 vault.json을 포함한 data 폴더 전체와 이 보관함의 Mac 키체인 항목이 필요합니다. Mac 로그인 암호만으로는 다른 Mac에서 복구할 수 없습니다.</p>

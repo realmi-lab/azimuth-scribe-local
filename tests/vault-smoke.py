@@ -311,6 +311,67 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                     renamed = await client.get("/api/download/recordings/legacy.wav")
                     self.assertEqual(renamed.headers["content-type"], "audio/x-wav")
                     self.assertTrue(renamed.headers["content-disposition"].endswith(".wav"))
+                    # Deleting: the written result and the recording file are chosen separately.
+                    async def upload(name):
+                        with io.BytesIO(audio) as source:
+                            return (await client.post("/api/files", files={"files": (name, source, "audio/wav")})).json()["files"][0]
+                    async def files():
+                        return (await client.get("/api/state")).json()["files"]
+                    remove = lambda **body: client.post("/api/files/delete", json=body)
+                    one = await upload("지울 기록.wav")
+                    stored = s.VAULT.encrypted(root / "Recordings" / one["stored_name"])
+                    await client.patch("/api/text", json={"file_id": one["id"], "transcript": "받아쓴 글", "summary": "요약한 글"})
+                    self.assertEqual((await remove(id=one["id"])).status_code, 400)
+                    self.assertEqual((await remove(id="missing", audio=True)).status_code, 404)
+                    text_only = (await remove(id=one["id"], summary=True)).json()
+                    self.assertFalse(text_only["removed"])
+                    kept = (await files())[2]
+                    self.assertEqual((kept["transcript"], kept["summary"], kept["stored_name"], kept["status"]), ("", "", one["stored_name"], "Pending"))
+                    self.assertNotIn("trash", (await client.get("/api/state")).json())   # undo copies stay on the server
+                    self.assertEqual((await client.post("/api/files/restore", json={"undo": text_only["undo"]})).status_code, 200)
+                    self.assertEqual((await files())[2]["summary"], "요약한 글")
+                    self.assertEqual((await client.post("/api/files/restore", json={"undo": text_only["undo"]})).status_code, 410)
+                    audio_only = (await remove(id=one["id"], audio=True)).json()
+                    self.assertFalse(audio_only["removed"])
+                    self.assertEqual(((await files())[2]["stored_name"], (await files())[2]["transcript"]), ("", "받아쓴 글"))
+                    self.assertTrue(stored.exists())   # kept while the undo is offered
+                    self.assertEqual((await client.get("/api/state")).json()["runtime"]["leftover"]["count"], 0)
+                    self.assertEqual((await client.post(f"/api/transcribe?file_id={one['id']}")).status_code, 400)
+                    self.assertEqual((await client.post("/api/files/purge", json={"undo": audio_only["undo"]})).status_code, 200)
+                    self.assertFalse(stored.exists())
+                    self.assertEqual((await client.post("/api/files/restore", json={"undo": audio_only["undo"]})).status_code, 410)
+                    # The text that is left goes too: nothing remains, so the record leaves the list.
+                    self.assertTrue((await remove(id=one["id"], summary=True, audio=True)).json()["removed"])
+                    self.assertEqual(len(await files()), 2)
+                    two = await upload("둘 다 지울 기록.wav")
+                    stored = s.VAULT.encrypted(root / "Recordings" / two["stored_name"])
+                    both = (await remove(id=two["id"], summary=True, audio=True)).json()
+                    self.assertTrue(both["removed"])
+                    self.assertEqual(len(await files()), 2)
+                    self.assertEqual((await client.post("/api/files/restore", json={"undo": both["undo"]})).status_code, 200)
+                    self.assertEqual((await files())[2]["id"], two["id"])
+                    # Left alone, a deletion becomes final after the undo window.
+                    await remove(id=two["id"], audio=True)
+                    for entry in s.STATE["trash"]:
+                        entry["removed"] -= s.UNDO_SECONDS + 1
+                    await asyncio.sleep(1.3)
+                    self.assertFalse(stored.exists())
+                    self.assertEqual(s.STATE["trash"], [])
+                    self.assertEqual(len(await files()), 2)
+                    # Recordings an older version left behind: back on the list, or deleted for good.
+                    s.VAULT.write_bytes(root / "Recordings" / "orphan.wav", audio)
+                    self.assertEqual((await client.get("/api/state")).json()["runtime"]["leftover"], {"count": 1, "size": (root / "Recordings/orphan.wav.enc").stat().st_size})
+                    self.assertEqual((await client.post("/api/files/leftover", json={"action": "restore"})).json()["count"], 1)
+                    back = (await files())[2]
+                    self.assertEqual((back["stored_name"], back["duration"], back["status"]), ("orphan.wav", 1, "Pending"))
+                    self.assertTrue(back["name"].endswith(" 녹음.wav"))
+                    self.assertEqual((await client.get("/api/state")).json()["runtime"]["leftover"]["count"], 0)
+                    gone = (await remove(id=back["id"], audio=True)).json()
+                    await client.post("/api/files/purge", json={"undo": gone["undo"]})
+                    s.VAULT.write_bytes(root / "Recordings" / "orphan2.wav", audio)
+                    self.assertEqual((await client.post("/api/files/leftover", json={"action": "delete"})).json()["count"], 1)
+                    self.assertFalse((root / "Recordings/orphan2.wav.enc").exists())
+                    self.assertEqual(len(await files()), 2)
                     self.assertEqual((await client.patch("/api/text", json={"summary": SECRET})).status_code, 200)
                     exported = (await client.post("/api/export", json={"kind": "summary", "format": "md"})).json()
                     self.assertTrue((root / "Results" / (exported["filename"] + ".enc")).exists())
