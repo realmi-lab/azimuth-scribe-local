@@ -1,10 +1,13 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 let state = null, refreshing = false, pendingText = {}, saveTimer, saveChain = Promise.resolve();
-let currentFileSignature = "", seenJob = "", toastTimer, exportKind = "transcript";
+let currentFileSignature = "", seenJob = null, toastTimer, exportKind = "transcript";
 let draftPrompts = {}, editingPrompt = "", pollCounter = 0;
 let openingDeepLink = false;
 const isBusy = () => ["running", "stopping"].includes(state?.runtime.job?.status);
+const inPanel = () => !!document.body.dataset.panel;
+const STATUS_KO = {Completed: "완료", Processing: "처리 중", Error: "오류", Pending: "대기"};
+let summaryBackup = null;
 const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 
 class ApiError extends Error {
@@ -56,7 +59,9 @@ function renderFiles() {
   $("select-all").checked = !!state.files.length && selected.length === state.files.length;
   $("select-all").indeterminate = selected.length > 0 && selected.length < state.files.length;
   $("select-all").disabled = !state.files.length;
-  $("file-count").textContent = `${state.files.length} files${selected.length ? ` · ${selected.length} selected` : ""}`;
+  $("file-count").textContent = inPanel()
+    ? `파일 ${state.files.length}개${selected.length ? ` · ${selected.length}개 선택` : ""}`
+    : `${state.files.length} files${selected.length ? ` · ${selected.length} selected` : ""}`;
   if (signature === currentFileSignature) return;
   currentFileSignature = signature;
   $("empty-files").hidden = state.files.length > 0;
@@ -77,8 +82,9 @@ function renderFiles() {
     const duration = document.createElement("td"); duration.className = "duration";
     duration.textContent = formatDuration(file.duration);
     const statusCell = document.createElement("td"), status = document.createElement("span");
-    status.className = `file-status ${file.status}`; status.textContent = file.status;
+    status.className = `file-status ${file.status}`; status.textContent = inPanel() ? STATUS_KO[file.status] || file.status : file.status;
     status.title = file.error || file.status;
+    if (inPanel() && file.error) name.title = `${file.name} · 오류: ${file.error}`;
     statusCell.append(status); row.append(selectedCell, nameCell, duration, statusCell);
     $("file-list").append(row);
   }
@@ -101,7 +107,14 @@ function render() {
   setButton($("stt-button"), activeStt ? "Stop" : "STT", activeStt ? "stop" : "spark", activeStt);
   setButton($("summary-button"), activeSummary ? "Stop" : "Summary", activeSummary ? "stop" : "spark", activeSummary);
   $("stt-button").disabled = (busy && !activeStt) || job?.status === "stopping" || (!busy && !state.files.some(f => f.selected));
-  $("summary-button").disabled = (busy && !activeSummary) || job?.status === "stopping";
+  const hasTranscript = !!$("transcript").value.trim();
+  $("summary-button").disabled = (busy && !activeSummary) || job?.status === "stopping" || (!busy && !hasTranscript);
+  // Only the next step in record → transcribe → summarize is emphasised.
+  const nextIsStt = !busy && state.files.some(f => f.selected && f.status !== "Completed");
+  $("stt-button").classList.toggle("primary", activeStt || nextIsStt || !inPanel());
+  $("summary-button").classList.toggle("primary", activeSummary || (!nextIsStt && hasTranscript) || !inPanel());
+  $("stt-button").title = !busy && !state.files.some(f => f.selected) ? "받아쓸 파일을 목록에서 선택하세요." : "";
+  $("summary-button").title = !busy && !hasTranscript ? "먼저 받아쓰기를 하거나 텍스트를 입력하세요." : "";
   $("delete-button").disabled = busy || !state.files.some(f => f.selected);
   $("clear-button").disabled = busy || !$("transcript").value;
   $("save-transcript").disabled = !$("transcript").value.trim();
@@ -110,8 +123,10 @@ function render() {
   const setting = state.settings;
   const runningModel = state.runtime.ollama.running.find(m => m.name === setting.llm_model);
   const selectedDevice = {auto: "Auto", cpu: "CPU", gpu: "GPU 우선"}[setting.llm_device];
-  $("model-label").textContent = `Model: ${setting.llm_model} · Device: ${runningModel?.device || selectedDevice}`;
-  const status = job?.message || (stt.state === "ready" ? `STT model ready. [${setting.whisper_model} · ${stt.device}]` : stt.installed ? `Whisper ${setting.whisper_model} 설치됨 · STT 실행 시 모델을 불러옵니다.` : "Settings → Preferences에서 로컬 모델을 준비해 주세요.");
+  $("model-label").textContent = inPanel()
+    ? `요약 모델 ${setting.llm_model} · ${runningModel?.device || selectedDevice}`
+    : `Model: ${setting.llm_model} · Device: ${runningModel?.device || selectedDevice}`;
+  const status = job?.message || (stt.state === "ready" ? (inPanel() ? `음성 인식 준비됨 · ${setting.whisper_model}` : `STT model ready. [${setting.whisper_model} · ${stt.device}]`) : stt.installed ? `Whisper ${setting.whisper_model} 설치됨 · STT 실행 시 모델을 불러옵니다.` : (inPanel() ? "⋯ → 설정…에서" : "Settings → Preferences에서") + " 로컬 모델을 준비해 주세요.");
   $("app-status").textContent = status;
   $("app-dot").className = `status-dot ${busy ? "working" : job?.status === "error" ? "error" : stt.installed ? "ready" : ""}`;
   $("job-progress").hidden = !busy;
@@ -119,10 +134,20 @@ function render() {
   else { $("job-progress").max = 1; $("job-progress").value = job.progress; }
   const jobKey = job ? `${job.id}:${job.status}` : "";
   if (jobKey && jobKey !== seenJob) {
-    if (job.status === "error") toast(job.message, true);
-    if (job.status === "completed" || job.status === "cancelled") toast(job.message);
+    const firstLook = seenJob === null;
     seenJob = jobKey;
+    if (!firstLook) {
+      if (job.status === "error") toast(job.message, true);
+      else if (job.type === "summary" && job.status === "completed" && summaryBackup) {
+        const previous = summaryBackup;
+        toastUndo(`${job.message} 이전 요약을 덮어썼습니다.`, async () => {
+          await api("/api/text", {method: "PATCH", body: {summary: previous}}); await refresh(); toast("이전 요약으로 되돌렸습니다.");
+        });
+      } else if (job.status === "completed" || job.status === "cancelled") toast(job.message);
+      if (job.type === "summary" && job.status !== "running") summaryBackup = null;
+    }
   }
+  renderSummaryView();
   if ($("settings-dialog").open) renderSystemStatus();
 }
 async function refresh(force = false) {
@@ -196,7 +221,14 @@ $("delete-button").addEventListener("click", action(async () => {
   await api("/api/files/remove", {method: "POST", body: {ids: state.files.filter(f => f.selected).map(f => f.id)}});
   toast("선택한 파일을 목록에서 제거했습니다. 디스크의 파일은 보관됩니다."); await refresh();
 }));
-$("clear-button").addEventListener("click", action(async () => { $("transcript").value = ""; queueText("transcript"); await flushText(); await refresh(); }));
+$("clear-button").addEventListener("click", action(async () => {
+  await flushText();
+  const previous = $("transcript").value;
+  $("transcript").value = ""; queueText("transcript"); await flushText(); await refresh();
+  toastUndo("받아쓰기를 비웠습니다.", async () => {
+    await api("/api/text", {method: "PATCH", body: {transcript: previous}}); await refresh(); toast("받아쓰기를 되돌렸습니다.");
+  });
+}));
 async function stopJob() { await api("/api/cancel", {method: "POST"}); await refresh(); }
 $("stt-button").addEventListener("click", action(async () => {
   if (isBusy()) return stopJob();
@@ -211,6 +243,7 @@ async function confirmContext(message) {
   });
 }
 async function startSummary(expand = false) {
+  if (!expand) summaryBackup = $("summary").value.trim() ? $("summary").value : null;
   try { await api("/api/summary", {method: "POST", body: {prompt: $("prompt-select").value, expand_context: expand}}); }
   catch (error) {
     if (error.detail?.code === "context" && !expand) {
@@ -409,6 +442,46 @@ $("replace-form").addEventListener("submit", replaceAction(async event => {
     await api("/api/text", {method: "PATCH", body: before}); await refresh(); toast("일괄 수정을 되돌렸습니다.");
   });
 }));
+let editingSummary = false;
+function markdownToHtml(markdown) {
+  const escape = value => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inline = value => escape(value).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  let html = "", list = false;
+  for (const raw of markdown.split("\n")) {
+    const line = raw.trimEnd(), heading = line.match(/^(#{1,6})\s+(.*)$/), item = line.match(/^\s*[-*•]\s+(.*)$/);
+    if (!item && list) { html += "</ul>"; list = false; }
+    if (heading) html += `<h3>${inline(heading[2])}</h3>`;
+    else if (item) { if (!list) { html += "<ul>"; list = true; } html += `<li>${inline(item[1])}</li>`; }
+    else if (line.trim()) html += `<p>${inline(line)}</p>`;
+  }
+  return html + (list ? "</ul>" : "");
+}
+function renderSummaryView() {
+  if (!inPanel()) return;
+  const text = $("summary").value, showView = !editingSummary && !!text.trim();
+  if (showView) $("summary-view").innerHTML = markdownToHtml(text);
+  $("summary-view").hidden = !showView;
+  $("summary").hidden = showView;
+  $("summary-edit").textContent = editingSummary ? "완료" : "편집";
+  $("summary-edit").hidden = !text.trim() && !editingSummary;
+  $("summary-edit").disabled = isBusy();
+}
+$("summary-edit").addEventListener("click", action(async () => {
+  editingSummary = !editingSummary;
+  if (!editingSummary) await flushText();
+  renderSummaryView();
+  if (editingSummary) $("summary").focus();
+}));
+// Keyboard: ⌘⏎ summarise, ⌘S save the text being worked on.
+document.addEventListener("keydown", event => {
+  if (!(event.metaKey || event.ctrlKey) || document.querySelector("dialog[open]")) return;
+  if (event.key === "Enter" && !$("summary-button").disabled) { event.preventDefault(); $("summary-button").click(); }
+  if (event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    const kind = document.activeElement === $("summary") || (!$("transcript").value.trim() && $("summary").value.trim()) ? "summary" : "transcript";
+    if ($(kind).value.trim()) openSave(kind);
+  }
+});
 function showInfo(title, content) { $("info-title").textContent = title; $("info-content").innerHTML = content; $("info-dialog").showModal(); }
 $("help-button").onclick = () => showInfo("Local LLM Encoder 사용 방법", `
   <h3>1. 녹음하거나 파일 추가</h3><p>Start record를 눌러 마이크 권한을 허용한 뒤 대화를 녹음하세요. Stop record로 마치면 16 kHz 모노 WAV로 저장됩니다. 기존 파일은 Add로 여러 개를 추가할 수 있습니다.</p>

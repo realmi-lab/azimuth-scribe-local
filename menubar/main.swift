@@ -83,6 +83,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.cancel = { [weak self] in self?.cancelWork(nil) }
         panel.openFolder = { [weak self] path in self?.openFolder(path) }
         panel.quit = { [weak self] in self?.quitEverything(nil) }
+        panel.help = { [weak self] in self?.workspace.web.evaluateJavaScript("document.getElementById('help-button').click()") }
         window = makeWindow()
         let mainMenu = NSMenu()
         let appMenu = NSMenuItem()
