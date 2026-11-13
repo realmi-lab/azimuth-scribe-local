@@ -15,7 +15,7 @@ macOS 14 이상 Apple Silicon Mac과 Apple Command Line Tools가 필요합니다
 | 용도 | 모델 | 공식 다운로드·모델 페이지 | 자동 다운로드 방법 |
 | --- | --- | --- | --- |
 | 한국어 요약 | **Qwen3 4B Instruct** · `qwen3:4b-instruct` · 약 2.5GB | [Ollama 모델 페이지](https://ollama.com/library/qwen3:4b-instruct) | `ollama pull qwen3:4b-instruct` 또는 앱의 모델 준비 |
-| 음성 인식 | **faster-whisper small** · 다국어 · `model.bin` 약 484MB | [Systran 모델 페이지](https://huggingface.co/Systran/faster-whisper-small), [model.bin 다운로드](https://huggingface.co/Systran/faster-whisper-small/resolve/main/model.bin), [전체 파일 목록](https://huggingface.co/Systran/faster-whisper-small/tree/main) | `download-models.command` 또는 앱의 모델 준비 |
+| 음성 인식 | **faster-whisper large-v3-turbo** · 다국어 · `model.bin` 약 1.6GB | [모델 페이지](https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo), [model.bin 다운로드](https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/main/model.bin), [전체 파일 목록](https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/tree/main) | `download-models.command` 또는 앱의 모델 준비 |
 
 설치가 끝난 뒤 모델만 다시 준비하려면:
 
@@ -33,9 +33,10 @@ python3 launcher.py --download-models
 "$HOME/Library/Application Support/Azimuth Scribe Local/.venv/bin/python" - <<'PY'
 from pathlib import Path
 from huggingface_hub import snapshot_download
-target = Path.home() / "Library/Application Support/Azimuth Scribe Local/data/models/faster-whisper-small"
+target = Path.home() / "Library/Application Support/Azimuth Scribe Local/data/models/faster-whisper-large-v3-turbo"
 snapshot_download(
-    repo_id="Systran/faster-whisper-small",
+    repo_id="mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    revision="0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
     local_dir=str(target),
     allow_patterns=["config.json", "model.bin", "tokenizer.json", "vocabulary.*", "preprocessor_config.json"],
 )
@@ -76,5 +77,7 @@ PyAV가 사용하는 FFmpeg 라이브러리는 [공식 binary wheel](https://pya
 **1.3.0부터 Touch ID 또는 Mac 로그인 암호로만 접근합니다.** 별도 보관함 비밀번호와 브라우저 로그인은 제거했습니다. 기존 보관함은 키체인에 저장한 이전 연결을 macOS 본인 인증 후 전환하며 녹음과 텍스트는 유지됩니다. 이전 연결이 없다면 파일을 보존하고 전환을 중단합니다. [암호화·전환·키체인 백업 안내](security.md)를 확인하세요. 기존 모델 준비 명령은 잠긴 상태에서도 사용할 수 있습니다.
 
 1.2.0에서 도입한 사이드바와 녹음별 카드, 원문·요약 편집, 암호화 음성 재생을 그대로 제공합니다. 이전 버전의 별도 비밀번호 안내는 1.3.0에 적용되지 않습니다.
+
+1.4.0에서는 음성 인식 기본 모델을 large-v3-turbo로 바꾸고, 기록마다 **요약하기** 한 번으로 받아쓰기와 요약을 이어서 진행합니다. 기록을 열면 요약이 먼저 보이고 그 자리에서 고칩니다. 음성 재생은 열어 둔 기록에서 합니다. 이전 기본값 small을 쓰던 설치는 처음 실행할 때 large-v3-turbo(약 1.6GB)를 자동으로 내려받습니다.
 
 1.3.1부터 **일괄 수정은 현재 열어 둔 요약 본문에만 적용**합니다. 요약 탭에서 실행하며 왼쪽 메뉴와 받아쓰기 화면에서는 제거했습니다. 저장한 규칙을 새 받아쓰기·요약에 자동 적용하지 않으며, 되돌리기도 해당 요약 하나만 복원합니다.

@@ -5,10 +5,18 @@ let seenJob = "", toastTimer, exportKind = "transcript";
 let draftPrompts = {}, editingPrompt = "", pollCounter = 0;
 let openingDeepLink = false;
 let privateGeneration = 0, editingFileId = null, pendingFileId = null, exportFileId = null;
-let replaceFileId = null;
+let replaceFileId = null, promptChoice = "";
 const editorSource = () => (editingFileId ? state?.files.find(file => file.id === editingFileId) : state) || {};
 function showDialog(dialog) { if (!document.body.classList.contains("vault-locked")) dialog.showModal(); }
 const isBusy = () => ["running", "stopping"].includes(state?.runtime.job?.status);
+// The recording a running job belongs to: a file id, "notes" for the shared memo, or null.
+const jobTarget = () => (isBusy() ? state.runtime.job.target : null);
+// Summary format for one-click actions: the one picked here, else the one used last time.
+function currentPrompt() {
+  const names = Object.keys(state?.prompts || {});
+  return [promptChoice, state?.last_prompt].find(name => names.includes(name)) || names[0];
+}
+const displayName = file => file.name.replace(/\.(wav|mp3|m4a|flac|ogg|aac|webm|mp4|aiff?)$/i, "");
 const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 
 class ApiError extends Error {
@@ -39,7 +47,8 @@ function action(callback) {
   return async (event) => { try { await callback(event); } catch (error) { toast(error.message, true); } };
 }
 function setButton(button, label, glyph, stop = false) {
-  label = ({Stop:"중단", STT:"받아쓰기", Summary:"요약 생성", "Start record":"녹음 시작", "Stop record":"녹음 종료"})[label] || label;
+  if (button.dataset.label === label + glyph) return;   // keep focus and hover state across polling
+  button.dataset.label = label + glyph;
   button.replaceChildren();
   const wrapper = document.createElement("span"); wrapper.innerHTML = icon(glyph);
   button.append(wrapper.firstChild, Object.assign(document.createElement("span"), {textContent: label}));
@@ -54,42 +63,69 @@ function formatDuration(seconds) {
 function updateCounts() {
   $("transcript-count").textContent = `${$("transcript").value.length.toLocaleString()}자`;
   $("summary-count").textContent = `${$("summary").value.length.toLocaleString()}자`;
-  $("summary-replace").disabled = isBusy() || !$("summary").value.trim();
 }
 function renderFiles() { window.ScribeHistory?.render(state); }
 
+// Buttons of the open record. One primary action: "요약하기" transcribes first when needed.
+function renderActions() {
+  if (!state) return;
+  const busy = isBusy(), stopping = state.runtime.job?.status === "stopping";
+  const isFile = !!editingFileId, mine = busy && jobTarget() === (editingFileId || "notes");
+  const hasSummary = !!$("summary").value.trim(), hasText = !!$("transcript").value.trim();
+  const elsewhere = busy && !mine ? "다른 작업이 끝난 뒤 사용할 수 있습니다." : "";
+  if (mine) setButton($("summary-button"), "중단", "stop", true);
+  else setButton($("summary-button"), hasSummary ? "다시 요약" : "요약하기", "spark");
+  $("summary-button").classList.toggle("primary", !mine && !hasSummary);
+  $("summary-button").disabled = mine ? stopping : busy || (!isFile && !hasText);
+  $("summary-button").title = elsewhere || (mine ? "진행 중인 작업을 멈춥니다" : !isFile && !hasText ? "원문 탭에 글을 붙여 넣으면 요약할 수 있습니다."
+    : hasText ? "고른 서식으로 요약합니다 (⌘⏎)" : "받아쓰기부터 요약까지 한 번에 진행합니다 (⌘⏎)");
+  $("stt-button").hidden = !isFile;
+  if (mine) setButton($("stt-button"), "중단", "stop", true);
+  else setButton($("stt-button"), hasText ? "다시 받아쓰기" : "받아쓰기", "repeat");
+  $("stt-button").disabled = mine ? stopping : busy;
+  $("stt-button").title = elsewhere || (mine ? "진행 중인 작업을 멈춥니다" : "녹음을 다시 듣고 원문을 새로 씁니다. 지금 원문은 바뀝니다.");
+  $("prompt-select").disabled = busy;
+  for (const id of ["copy-button", "summary-replace", "save-summary"]) $(id).hidden = !hasSummary;
+  $("summary-replace").disabled = busy || !hasSummary;
+  $("copy-button").disabled = $("save-summary").disabled = !hasSummary;
+  for (const id of ["copy-transcript", "save-transcript"]) { $(id).hidden = !hasText; $(id).disabled = !hasText; }
+  $("clear-button").hidden = isFile || !hasText;
+  $("clear-button").disabled = busy || !hasText;
+  // While this record is being worked on, say so right where the result will appear.
+  const job = state.runtime.job, percent = mine && job.progress != null ? ` ${Math.round(job.progress * 100)}%` : "";
+  $("summary-note").textContent = $("transcript-note").textContent = mine ? job.message + percent : "";
+  $("summary").placeholder = mine ? (job.stage === "stt" ? "녹음을 받아쓰고 있습니다. 끝나면 이어서 요약합니다." : "요약을 쓰고 있습니다. 곧 이 자리에 나타납니다.")
+    : !isFile ? "원문 탭에 글을 붙여 넣고 ‘요약하기’를 누르세요."
+    : hasText ? "‘요약하기’를 누르면 고른 서식으로 요약합니다.\n완성된 요약은 이 자리에서 바로 고칠 수 있습니다."
+    : "‘요약하기’를 누르면 받아쓰기부터 요약까지 한 번에 진행합니다.\n완성된 요약은 이 자리에서 바로 고칠 수 있습니다.";
+  $("transcript").placeholder = mine && job.stage === "stt" ? "녹음을 받아쓰고 있습니다. 끝나면 이 자리에 나타납니다."
+    : isFile ? "‘요약하기’를 누르면 받아쓴 원문이 여기에 나옵니다. 틀린 곳은 바로 고칠 수 있습니다."
+    : "받아쓴 원문이 차례로 모입니다. 다른 곳의 글을 붙여 넣어 요약할 수도 있습니다.";
+}
+
 function render() {
-  const busy = isBusy(), job = state.runtime.job, stt = state.runtime.stt;
+  const busy = isBusy(), job = state.runtime.job, stt = state.runtime.stt, setting = state.settings;
+  const ollama = state.runtime.ollama;
   renderFiles();
   for (const key of ["transcript", "summary"]) {
     if (!(key in pendingText) && $(key).value !== (editorSource()[key] || "")) $(key).value = editorSource()[key] || "";
     $(key).readOnly = busy;
   }
   updateCounts();
-  const choice = $("prompt-select").value;
-  if (JSON.stringify([...$("prompt-select").options].map(o => o.value)) !== JSON.stringify(Object.keys(state.prompts))) {
-    $("prompt-select").replaceChildren(...Object.keys(state.prompts).map(name => new Option(name, name)));
-    if (choice in state.prompts) $("prompt-select").value = choice;
+  const names = Object.keys(state.prompts);
+  if (JSON.stringify([...$("prompt-select").options].map(o => o.value)) !== JSON.stringify(names)) {
+    $("prompt-select").replaceChildren(...names.map(name => new Option(name, name)));
   }
-  $("prompt-select").disabled = busy;
-  setButton($("stt-button"), busy ? "Stop" : "STT", busy ? "stop" : "spark", busy);
-  setButton($("summary-button"), busy ? "Stop" : "Summary", busy ? "stop" : "spark", busy);
-  const visibleSelection = (window.ScribeHistory?.visibleFiles() || state.files).filter(file => file.selected);
-  $("stt-button").disabled = job?.status === "stopping" || (!busy && !visibleSelection.length);
-  $("stt-button").title = busy ? "진행 중인 작업 중단" : `표시된 기록 중 선택한 ${visibleSelection.length}개 받아쓰기`;
-  $("summary-button").disabled = job?.status === "stopping" || (!busy && !$("transcript").value.trim());
-  $("delete-button").disabled = busy || !visibleSelection.length;
-  $("clear-button").disabled = busy || !$("transcript").value;
-  $("save-transcript").disabled = !$("transcript").value.trim();
-  $("save-summary").disabled = !$("summary").value.trim();
-  $("copy-button").disabled = !$("summary").value.trim();
-  const setting = state.settings;
-  const runningModel = state.runtime.ollama.running.find(m => m.name === setting.llm_model);
-  const selectedDevice = {auto: "Auto", cpu: "CPU", gpu: "GPU 우선"}[setting.llm_device];
-  $("model-label").textContent = `요약 모델 ${setting.llm_model} · ${runningModel?.device || selectedDevice}`;
-  const status = job?.message || (stt.state === "ready" ? `음성 모델 준비됨 · ${setting.whisper_model} · ${stt.device}` : stt.installed ? `Whisper ${setting.whisper_model} 설치됨 · STT 실행 시 모델을 불러옵니다.` : "모델 및 설정에서 로컬 모델을 준비해 주세요.");
-  $("app-status").textContent = status;
-  $("app-dot").className = `status-dot ${busy ? "working" : job?.status === "error" ? "error" : stt.installed ? "ready" : ""}`;
+  if (document.activeElement !== $("prompt-select")) $("prompt-select").value = currentPrompt();
+  renderActions();
+  $("model-label").textContent = `요약 모델 ${setting.llm_model}`;
+  const idle = !stt.installed || !ollama.models.includes(setting.llm_model)
+    ? (ollama.connected || !stt.installed ? "모델을 아직 준비하지 못했습니다. 왼쪽 ‘설정’에서 ‘모델 준비’를 눌러 주세요."
+      : "요약 프로그램(Ollama)이 꺼져 있습니다. 앱을 다시 시작해 주세요.")
+    : `준비됨 · 음성 인식 ${setting.whisper_model} · 요약 ${setting.llm_model}`;
+  const ready = stt.installed && ollama.models.includes(setting.llm_model);
+  $("app-status").textContent = job?.message || idle;
+  $("app-dot").className = `status-dot ${busy ? "working" : job?.status === "error" || !ready ? "error" : "ready"}`;
   $("job-progress").hidden = !busy;
   if (job?.progress === null || job?.progress === undefined) $("job-progress").removeAttribute("value");
   else { $("job-progress").max = 1; $("job-progress").value = job.progress; }
@@ -126,11 +162,7 @@ async function refresh(force = false) {
 function queueText(key) {
   pendingFileId = editingFileId; pendingText[key] = $(key).value; updateCounts();
   $("editor-save-status").textContent = "저장 중…";
-  $("summary-button").disabled = isBusy() || !$("transcript").value.trim();
-  $("clear-button").disabled = !$("transcript").value;
-  $("copy-button").disabled = !$("summary").value.trim();
-  $("save-transcript").disabled = !$("transcript").value.trim();
-  $("save-summary").disabled = !$("summary").value.trim();
+  renderActions();
   clearTimeout(saveTimer); saveTimer = setTimeout(() => flushText().catch(e => toast(e.message, true)), 650);
 }
 function flushText() {
@@ -145,7 +177,7 @@ function flushText() {
       const target = targetId ? state?.files.find(file => file.id === targetId) : state;
       if (target) target[key] = value;
     }
-    if (!Object.keys(pendingText).length) $("editor-save-status").textContent = "보관함에 저장됨";
+    if (!Object.keys(pendingText).length) $("editor-save-status").textContent = "저장됨";
     window.ScribeHistory?.render(state);
   });
   return saveChain;
@@ -157,13 +189,24 @@ async function uploadFiles(files, recording = false) {
   const data = new FormData(); for (const file of files) data.append("files", file);
   data.append("recording", String(recording));
   $("add-button").disabled = true;
+  let added = [];
   try {
-    await api("/api/files", {method: "POST", body: data});
-    toast(recording ? "녹음을 저장했습니다." : `${files.length}개 파일을 추가했습니다.`);
+    added = (await api("/api/files", {method: "POST", body: data})).files;
   } finally { $("add-button").disabled = false; await refresh(); }
+  // One new record opens straight away so the next step, "요약하기", is right there.
+  if (added.length === 1) await window.ScribeHistory.openEditor(added[0].id, "summary");
+  else toast(`${added.length}개 파일을 추가했습니다.`);
 }
+// The Mac app records natively, then asks the page to show the new record.
+window.openRecord = async id => {
+  for (let attempt = 0; attempt < 20 && !state?.files.some(file => file.id === id); attempt++) {
+    await refresh();
+    if (!state?.files.some(file => file.id === id)) await new Promise(resolve => setTimeout(resolve, 150));
+  }
+  await window.ScribeHistory.openEditor(id, "summary");
+};
 $("add-button").addEventListener("click", () => $("audio-input").click());
-$("empty-files").addEventListener("click", () => $("audio-input").click());
+$("empty-add").addEventListener("click", () => $("audio-input").click());
 $("audio-input").addEventListener("change", action(async () => {
   const files = [...$("audio-input").files]; $("audio-input").value = ""; await uploadFiles(files);
 }));
@@ -176,53 +219,45 @@ $("drop-zone").addEventListener("drop", action(async e => {
 }));
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("drop", e => e.preventDefault());
-$("select-all").addEventListener("change", action(async () => {
-  await api("/api/files/selection", {method: "PATCH", body: {ids: (window.ScribeHistory?.visibleFiles() || state.files).map(f => f.id), selected: $("select-all").checked}}); await refresh();
-}));
-$("delete-button").addEventListener("click", action(async () => {
-  await flushText();
-  await api("/api/files/remove", {method: "POST", body: {ids: (window.ScribeHistory?.visibleFiles() || state.files).filter(f => f.selected).map(f => f.id)}});
-  toast("선택한 파일을 목록에서 제거했습니다. 디스크의 파일은 보관됩니다."); await refresh();
-}));
 $("clear-button").addEventListener("click", action(async () => {
   await flushText();
   const previous = $("transcript").value, fileId = editingFileId;
   $("transcript").value = ""; queueText("transcript"); await flushText(); await refresh();
-  toastUndo("받아쓰기를 비웠습니다.", async () => {
-    await api("/api/text", {method: "PATCH", body: {transcript: previous, file_id: fileId}}); await refresh(); toast("받아쓰기를 되돌렸습니다.");
+  toastUndo("원문을 비웠습니다.", async () => {
+    await api("/api/text", {method: "PATCH", body: {transcript: previous, file_id: fileId}}); await refresh(); toast("원문을 되돌렸습니다.");
   });
 }));
 async function stopJob() { await api("/api/cancel", {method: "POST"}); await refresh(); }
-$("stt-button").addEventListener("click", action(async () => {
-  if (isBusy()) return stopJob();
-  await flushText(); await api("/api/transcribe", {method: "POST", body: {ids: (window.ScribeHistory?.visibleFiles() || state.files).filter(f => f.selected).map(f => f.id)}}); await refresh();
-}));
-async function confirmContext(message) {
-  $("confirm-message").textContent = message; showDialog($("confirm-dialog"));
-  return new Promise(resolve => {
-    const finish = answer => { $("confirm-dialog").close(); resolve(answer); };
-    $("confirm-yes").onclick = () => finish(true); $("confirm-no").onclick = () => finish(false);
-    $("confirm-dialog").oncancel = () => resolve(false);
-  });
-}
-async function startSummary(expand = false, fileId = editingFileId, prompt = $("prompt-select").value) {
-  try { await api("/api/summary", {method: "POST", body: {prompt, expand_context: expand, file_id: fileId}}); }
-  catch (error) {
-    if (error.detail?.code === "context" && !expand) {
-      if (await confirmContext(error.detail.message)) return startSummary(true, fileId, prompt);
-      return;
-    }
-    throw error;
-  }
+// "요약하기": the server transcribes first when the recording has no transcript yet.
+async function startSummary(fileId = editingFileId, prompt = currentPrompt()) {
+  await flushText();
+  await api("/api/summary", {method: "POST", body: {prompt, file_id: fileId}});
   await refresh();
 }
-$("summary-button").addEventListener("click", action(async () => { if (isBusy()) return stopJob(); await flushText(); await startSummary(); }));
-$("copy-button").addEventListener("click", action(async () => { await navigator.clipboard.writeText($("summary").value); toast("요약을 클립보드에 복사했습니다."); }));
+async function summarizeMany(ids) {
+  await flushText();
+  await api("/api/summary", {method: "POST", body: {prompt: currentPrompt(), ids}});
+  await refresh();
+}
+$("prompt-select").addEventListener("change", () => { promptChoice = $("prompt-select").value; });
+$("summary-button").addEventListener("click", action(async () => {
+  if (isBusy()) return stopJob();
+  await startSummary(editingFileId, $("prompt-select").value);
+}));
+$("stt-button").addEventListener("click", action(async () => {
+  if (isBusy()) return stopJob();
+  if (!editingFileId) return;
+  await flushText(); await api(`/api/transcribe?file_id=${encodeURIComponent(editingFileId)}`, {method: "POST"}); await refresh();
+}));
+document.querySelectorAll("[data-copy]").forEach(button => button.addEventListener("click", action(async () => {
+  await navigator.clipboard.writeText($(button.dataset.copy).value);
+  toast(button.dataset.copy === "summary" ? "요약을 복사했습니다." : "원문을 복사했습니다.");
+})));
 
 function openSave(kind) {
   if (!$(kind).value.trim()) return toast("저장할 내용이 없습니다.", true);
   exportKind = kind; exportFileId = editingFileId; $("save-plain").checked = false;
-  $("save-title").textContent = kind === "transcript" ? "받아쓰기 저장" : "요약 저장"; showDialog($("save-dialog"));
+  $("save-title").textContent = kind === "transcript" ? "원문을 파일로 저장" : "요약을 파일로 저장"; showDialog($("save-dialog"));
 }
 $("save-transcript").onclick = () => openSave("transcript"); $("save-summary").onclick = () => openSave("summary");
 $("save-form").addEventListener("submit", action(async e => {
@@ -237,7 +272,8 @@ $("save-form").addEventListener("submit", action(async e => {
       document.body.append(link); link.click(); link.remove();
     }
   }
-  $("save-dialog").close(); toast("Results 폴더에 암호화해 저장했습니다.");
+  $("save-dialog").close(); toast("저장했습니다. 왼쪽 ‘저장한 파일’에서 다시 볼 수 있습니다.");
+  window.ScribeHistory?.loadSaved();
 }));
 document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 document.addEventListener("click", e => document.querySelectorAll("details.menu[open]").forEach(menu => { if (!menu.contains(e.target)) menu.open = false; }));
@@ -250,7 +286,7 @@ function statusLine(message, ready) {
 function renderSystemStatus() {
   const ollama = state.runtime.ollama, stt = state.runtime.stt;
   const lines = [statusLine(ollama.connected ? `Ollama 연결됨 · 설치된 로컬 모델 ${ollama.models.length}개` : "Ollama에 연결할 수 없습니다. Ollama를 실행하세요.", ollama.connected),
-    statusLine(stt.state === "ready" ? `Whisper ${state.settings.whisper_model} · ${stt.device}` : stt.installed ? `Whisper ${state.settings.whisper_model} · 다운로드 완료` : "선택한 Whisper 모델을 내려받아 주세요.", stt.installed)];
+    statusLine(stt.state === "ready" ? `음성 인식 ${state.settings.whisper_model} · ${stt.device}에서 실행` : stt.installed ? `음성 인식 ${state.settings.whisper_model} · 준비됨` : `음성 인식 ${state.settings.whisper_model} · 아직 없음. 아래 ‘모델 준비’를 눌러 주세요.`, stt.installed)];
   for (const model of ollama.running) lines.push(statusLine(`${model.name} · ${model.device}에서 실행 중`, true));
   $("system-status-list").replaceChildren(...lines);
   $("data-path").textContent = state.runtime.data_path;
@@ -325,40 +361,54 @@ $("prompts-form").addEventListener("submit", action(async e => {
   e.preventDefault(); savePromptDraft(); await api("/api/prompts", {method: "PUT", body: {prompts: draftPrompts}});
   $("prompts-dialog").close(); await refresh(); toast("요약 서식을 저장했습니다.");
 }));
+// A saved result in the user's words: "요약 · 11월 13일 14:02 · Markdown".
+function savedLabel(file, withDate = true) {
+  const match = /_(stt|summary)\.(txt|md)$/.exec(file.name);
+  if (!match || !file.modified) return file.name;
+  const date = new Date(file.modified * 1000), two = value => String(value).padStart(2, "0");
+  const day = withDate ? `${date.getMonth() + 1}월 ${date.getDate()}일 ` : "";
+  return `${match[1] === "stt" ? "원문" : "요약"} · ${day}${two(date.getHours())}:${two(date.getMinutes())} · ${match[2] === "md" ? "Markdown" : "텍스트"}`;
+}
+// One row of a stored file: opens a preview in the Mac app, exports or downloads elsewhere.
+function storageRow(file, kind, generation, withDate = true) {
+  const row = document.createElement("div"); row.className = "storage-file";
+  const link = document.createElement("a"); link.href = file.url; link.download = file.name;
+  link.textContent = kind === "results" ? savedLabel(file, withDate) : file.name;
+  const size = document.createElement("span"); size.textContent = file.size < 1024 * 1024 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / 1024 / 1024).toFixed(1)} MB`;
+  if (document.body.dataset.panel && kind === "results") {
+    link.addEventListener("click", action(async event => {
+      event.preventDefault();
+      const open = row.nextElementSibling?.classList.contains("file-preview");
+      row.parentElement.querySelector(".file-preview")?.remove();
+      if (open) return;   // a second click closes the preview
+      const preview = document.createElement("pre");
+      const response = await fetch(file.url);
+      if (!response.ok) throw new Error("저장한 파일을 열 수 없습니다.");
+      preview.textContent = await response.text();
+      if (generation !== privateGeneration || document.body.classList.contains("vault-locked") || !row.isConnected) return;
+      preview.className = "file-preview";
+      row.after(preview);
+    }));
+  } else if (window.webkit?.messageHandlers?.scribeVault) {
+    link.addEventListener("click", event => {
+      event.preventDefault();
+      window.ScribeVault.bridge({action: "export", url: file.url, filename: file.name});
+    });
+  }
+  link.title = kind === "recordings" ? "암호화를 해제한 일반 음성 파일 내보내기" : `저장한 파일 열기 · ${file.name}`;
+  row.append(link, size);
+  return row;
+}
 async function openStorage(kind) {
   const generation = privateGeneration;
   const data = await api(`/api/storage/${kind}`);
   if (generation !== privateGeneration || document.body.classList.contains("vault-locked")) return;
-  $("storage-title").textContent = kind === "results" ? "Results · 저장 결과" : "Recordings · 녹음 파일";
+  $("storage-title").textContent = kind === "results" ? "저장한 파일" : "녹음 파일";
   $("storage-list").replaceChildren();
   if (!data.files.length) {
     const empty = document.createElement("p"); empty.className = "storage-empty"; empty.textContent = "저장된 파일이 없습니다."; $("storage-list").append(empty);
   }
-  for (const file of data.files) {
-    const row = document.createElement("div"); row.className = "storage-file";
-    const link = document.createElement("a"); link.href = file.url; link.download = file.name; link.textContent = file.name;
-    const size = document.createElement("span"); size.textContent = file.size < 1024 * 1024 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / 1024 / 1024).toFixed(1)} MB`;
-    if (document.body.dataset.panel && kind === "results") {
-      link.addEventListener("click", action(async event => {
-        event.preventDefault();
-        const preview = document.createElement("pre");
-        const response = await fetch(file.url);
-        if (!response.ok) throw new Error("결과를 열 수 없습니다.");
-        preview.textContent = await response.text();
-        if (generation !== privateGeneration || document.body.classList.contains("vault-locked")) return;
-        $("storage-list").querySelector(".file-preview")?.remove();
-        preview.className = "file-preview";
-        row.after(preview);
-      }));
-    } else if (window.webkit?.messageHandlers?.scribeVault) {
-      link.addEventListener("click", event => {
-        event.preventDefault();
-        window.ScribeVault.bridge({action: "export", url: file.url, filename: file.name});
-      });
-    }
-    link.title = kind === "recordings" ? "암호화를 해제한 일반 음성 파일 내보내기" : "저장 결과 열기";
-    row.append(link, size); $("storage-list").append(row);
-  }
+  for (const file of data.files) $("storage-list").append(storageRow(file, kind, generation));
   showDialog($("storage-dialog"));
 }
 // Batch correction is an explicit action on the summary opened in this dialog.
@@ -435,22 +485,24 @@ $("replace-form").addEventListener("submit", replaceAction(async event => {
   });
 }));
 document.addEventListener("keydown", event => {
-  if (!(event.metaKey || event.ctrlKey) || document.querySelector("dialog[open]") || document.body.classList.contains("vault-locked")) return;
-  if (event.key === "Enter" && !$("summary-button").disabled) { event.preventDefault(); $("summary-button").click(); }
+  if (!(event.metaKey || event.ctrlKey) || document.querySelector("dialog[open]") || document.body.classList.contains("vault-locked") || $("detail-view").hidden) return;
+  if (event.key === "Enter" && !isBusy() && !$("summary-button").disabled) { event.preventDefault(); $("summary-button").click(); }
   if (event.key.toLowerCase() === "s") {
     event.preventDefault();
-    const kind = document.activeElement === $("summary") ? "summary" : $("transcript").value.trim() ? "transcript" : "summary";
+    const kind = $("summary-panel").hidden ? "transcript" : "summary";
     if ($(kind).value.trim()) openSave(kind);
   }
 });
 function showInfo(title, content) { $("info-title").textContent = title; $("info-content").innerHTML = content; showDialog($("info-dialog")); }
-$("help-button").onclick = () => showInfo("Local LLM Encoder 사용 방법", `
-  <h3>1. 녹음하거나 파일 추가</h3><p>녹음 시작을 눌러 마이크 권한을 허용한 뒤 대화를 녹음하세요. 녹음 종료로 마치면 16 kHz 모노 WAV로 저장됩니다. 기존 파일은 파일 추가로 여러 개를 추가할 수 있습니다.</p>
-  <h3>2. 기록 카드에서 확인</h3><p>각 카드에서 음성을 재생하고 원문·요약을 전환할 수 있습니다. ‘다시 처리’에서 해당 음성의 받아쓰기나 요약 서식을 고르세요. 여러 파일은 체크 후 위쪽 받아쓰기를 누르면 됩니다. 검색 중에는 화면에 보이는 선택 항목만 처리합니다.</p>
-  <h3>3. 원문과 요약 편집</h3><p>카드의 제목이나 편집을 누르면 해당 기록을 넓게 열어 수정할 수 있습니다. 요약 탭의 ‘일괄 수정’은 열어 둔 요약 본문에서만 찾아 바꿉니다. ‘전체 메모’에서는 여러 받아쓰기의 합본과 직접 입력한 메모를 다룹니다.</p>
-  <h3>4. 저장과 내보내기</h3><p>편집 내용은 자동 저장됩니다. 저장 버튼으로 보관함에 TXT·Markdown 결과를 암호화해 보관할 수 있습니다. 일반 파일이 필요하면 저장 창에서 ‘일반 파일도 내보내기’를 선택하세요.</p>
-  <h3>보관함 잠금</h3><p>Mac 앱에서 Touch ID 또는 Mac 로그인 암호로만 엽니다. 암호는 macOS 인증창에서 입력하며 별도 앱 비밀번호는 사용하지 않습니다. 5분 동안 사용하지 않으면 잠깁니다. 녹음 중 임시 파일은 보호 대상에서 제외됩니다. 백업에는 vault.json을 포함한 data 전체와 해당 보관함의 Mac 키체인 항목이 필요합니다. Mac 로그인 암호만으로 다른 Mac에서 복구할 수 없습니다.</p>
-  <h3>모델과 데이터</h3><p>왼쪽 설정에서 모델, 언어, 실행 장치를 설정합니다. 모델 준비 시에만 모델 파일을 외부에서 내려받습니다. 음성·텍스트는 localhost에서 처리하며, 설치 앱의 녹음과 결과는 Application Support의 데이터 폴더에 보관합니다.</p>`);
+$("help-button").onclick = () => showInfo("사용 방법", `
+  <h3>1. 녹음하기</h3><p>‘녹음 시작’을 누르고 이야기한 뒤 ‘녹음 종료’를 누르세요. 방금 녹음한 기록이 바로 열립니다. 이미 있는 음성 파일은 ‘파일 추가’로 불러오거나 창에 끌어다 놓으면 됩니다.</p>
+  <h3>2. 요약하기</h3><p>서식(일반 요약, 회의록 등)을 고르고 ‘요약하기’를 누르세요. 받아쓰기와 요약을 차례로 한 번에 진행합니다. 긴 회의는 자동으로 여러 구간으로 나눠 정리한 뒤 하나로 합칩니다.</p>
+  <h3>3. 바로 고치기</h3><p>요약은 보이는 자리에서 바로 고칠 수 있고, 고친 내용은 자동으로 저장됩니다. ‘원문’ 탭에서는 받아쓴 글을 확인하고 고칠 수 있습니다. 원문을 고친 뒤 ‘다시 요약’을 누르면 고친 내용으로 새로 요약합니다. 자주 틀리는 낱말은 ‘일괄 수정’으로 한꺼번에 바꾸세요.</p>
+  <h3>4. 내보내기</h3><p>‘복사’로 다른 앱에 붙여 넣거나, ‘파일로 저장…’으로 TXT·Markdown 파일을 만드세요. 저장한 파일은 왼쪽 ‘저장한 파일’에서 다시 볼 수 있습니다. 암호화하지 않은 일반 파일이 필요하면 저장 창에서 ‘일반 파일도 내보내기’를 선택하세요.</p>
+  <h3>목록과 달력</h3><p>기록 화면 위쪽의 ‘목록 / 달력’으로 보기 방식을 바꿉니다. 달력은 녹음이 많은 날일수록 진한 색으로 보여 주고, 주황색 점은 그날 저장한 파일이 있다는 표시입니다. 날짜를 누르면 그날의 녹음과 저장한 파일이 나옵니다.</p>
+  <h3>전체 메모</h3><p>받아쓴 원문이 차례로 모이는 곳입니다. 여러 녹음을 한데 모아 요약하거나, 다른 곳의 글을 붙여 넣어 요약할 때 씁니다.</p>
+  <h3>보관함 잠금</h3><p>녹음과 글은 암호화해 보관하며 Mac 앱에서 Touch ID 또는 Mac 로그인 암호로만 엽니다. 암호는 macOS 인증창에서 입력하며 별도 앱 비밀번호는 없습니다. 5분 동안 쓰지 않으면 자동으로 잠깁니다. 백업에는 vault.json을 포함한 data 폴더 전체와 이 보관함의 Mac 키체인 항목이 필요합니다. Mac 로그인 암호만으로는 다른 Mac에서 복구할 수 없습니다.</p>
+  <h3>모델과 데이터</h3><p>음성과 글은 이 Mac(localhost) 안에서만 처리합니다. 인터넷은 ‘설정’에서 모델을 처음 내려받을 때만 사용합니다. 음성 인식 모델과 요약 모델은 ‘설정’에서 바꿀 수 있습니다.</p>`);
 $("licenses-button").onclick = () => showInfo("Third-Party Licenses", `
   <p>원본의 공개 소개와 매뉴얼을 참고해 localhost용으로 새로 구현한 프로그램입니다.</p>
   <table><tbody><tr><td>faster-whisper / CTranslate2 / Whisper</td><td>MIT</td></tr><tr><td>FastAPI / Uvicorn / HTTPX</td><td>MIT / BSD</td></tr><tr><td>PyAV / FFmpeg</td><td>BSD / LGPL·GPL</td></tr><tr><td>NumPy / ONNX Runtime</td><td>BSD / MIT</td></tr><tr><td>Ollama</td><td>MIT</td></tr><tr><td>Qwen3</td><td>Apache-2.0</td></tr></tbody></table>
@@ -461,7 +513,6 @@ document.querySelectorAll("[data-action]").forEach(button => button.addEventList
   const name = button.dataset.action;
   if (name === "settings") return openSettings(); if (name === "prompts") return openPrompts();
   if (name === "results" || name === "recordings") return openStorage(name);
-  openSave(name === "save-transcript" ? "transcript" : "summary");
 })));
 
 // Microphone data stays in the browser until it is saved to this localhost server.
@@ -475,8 +526,8 @@ function resetRecorder() {
   $("waveform").hidden = true; $("record-time").hidden = true;
 }
 function recorderReady() {
-  $("record-status").textContent = "녹음 준비"; $("record-hint").textContent = "마이크로 대화를 녹음하세요.";
-  setButton($("record-button"), "Start record", "mic"); $("record-button").disabled = false;
+  $("record-status").textContent = "녹음 준비"; $("record-hint").textContent = "녹음을 마치면 ‘요약하기’ 한 번으로 정리됩니다.";
+  setButton($("record-button"), "녹음 시작", "mic"); $("record-button").disabled = false;
 }
 async function saveRecording() {
   recordSaving = true; $("record-button").disabled = true; $("record-status").textContent = "저장 중…";
@@ -517,7 +568,8 @@ async function startRecording() {
       resetRecorder();
       const blob = new Blob(chunks, {type: mime});
       if (!blob.size) { recorderReady(); return toast("녹음된 데이터가 없습니다.", true); }
-      const stamp = `${startedDate.getFullYear()}-${String(startedDate.getMonth() + 1).padStart(2, "0")}-${String(startedDate.getDate()).padStart(2, "0")}_${String(startedDate.getHours()).padStart(2, "0")}-${String(startedDate.getMinutes()).padStart(2, "0")}-${String(startedDate.getSeconds()).padStart(2, "0")}`;
+      const two = value => String(value).padStart(2, "0");
+      const stamp = `${startedDate.getFullYear()}-${two(startedDate.getMonth() + 1)}-${two(startedDate.getDate())} ${two(startedDate.getHours())}.${two(startedDate.getMinutes())} 녹음`;
       const ext = mime.includes("mp4") ? "m4a" : mime.includes("ogg") ? "ogg" : "webm";
       unsavedRecording = new File([blob], `${stamp}.${ext}`, {type: mime}); await saveRecording();
     });
@@ -525,7 +577,7 @@ async function startRecording() {
     recorder.start(1000); startMeter(micStream);
     $("workspace").classList.add("recording"); $("record-status").textContent = "녹음 중";
     $("record-hint").textContent = "마치려면 녹음 종료를 누르세요."; $("record-time").hidden = false;
-    $("record-time").textContent = "00:00"; setButton($("record-button"), "Stop record", "stop", true);
+    $("record-time").textContent = "00:00"; setButton($("record-button"), "녹음 종료", "stop", true);
     $("record-button").disabled = false;
     recordingTimer = setInterval(() => { $("record-time").textContent = formatDuration((performance.now() - recordingStarted) / 1000); window.ScribeVault.touch(); }, 250);
   } catch (error) {
@@ -546,7 +598,7 @@ window.flushBeforeVaultLock = flushText;
 window.addEventListener("vault-locked", () => {
   privateGeneration += 1;
   clearTimeout(saveTimer); pendingText = {}; state = null; draftPrompts = {}; editingPrompt = "";
-  seenJob = ""; editingFileId = pendingFileId = exportFileId = replaceFileId = null;
+  seenJob = ""; promptChoice = ""; editingFileId = pendingFileId = exportFileId = replaceFileId = null;
   window.ScribeHistory?.clear();
   for (const id of ["transcript", "summary", "prompt-editor", "new-prompt-name", "audio-input"]) $(id).value = "";
   $("file-list").replaceChildren(); $("replace-rules").replaceChildren(); $("storage-list").replaceChildren();

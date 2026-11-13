@@ -1,7 +1,7 @@
 """Focused integration check with real local models and disposable test data.
 
 Run: .venv/bin/python tests/smoke.py
-Requires macOS 'say', the prepared Whisper small model and local qwen3:4b-instruct.
+Requires macOS 'say', the prepared Whisper large-v3-turbo model and local qwen3:4b-instruct.
 """
 import io
 import json
@@ -137,6 +137,24 @@ def main():
             assert len(clip_state["files"][0]["summary"]) > 40
             assert clip_state["summary"] == summary and not clip_state["files"][1].get("summary")
             print("PASS: per-recording transcription and meeting minutes", flush=True)
+            # "요약하기" on a fresh recording: one request transcribes, then summarises.
+            assert not clip_state["files"][1]["transcript"]
+            request("POST", "/api/summary", json={"prompt": "회의록", "file_id": second["id"]})
+            stages = set()
+            deadline = time.monotonic() + 240
+            while time.monotonic() < deadline:
+                piped = request("GET", "/api/state")
+                job = piped["runtime"]["job"]
+                if job["status"] not in ("running", "stopping"):
+                    break
+                assert job["target"] == second["id"]
+                stages.add(job["stage"])
+                time.sleep(0.1)
+            assert job["status"] == "completed", job
+            assert stages >= {"stt", "summary"}, stages
+            assert "시연" in piped["files"][1]["transcript"] and len(piped["files"][1]["summary"]) > 40
+            assert piped["last_prompt"] == "회의록" and piped["summary"] == summary
+            print("PASS: one request transcribes and summarises a new recording on", piped["runtime"]["stt"]["device"], flush=True)
             for fmt in ("txt", "md"):
                 output = request("POST", "/api/export", json={"kind": "summary", "format": fmt})
                 assert client.get(output["url"]).text == summary

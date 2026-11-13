@@ -39,15 +39,19 @@ try:
 except OSError:
     pass
 OLLAMA = "http://127.0.0.1:11434"
-WHISPER_MODELS = ("base", "small", "medium", "large-v3")
+WHISPER_MODELS = ("large-v3-turbo", "large-v3", "medium", "small", "base")
+# Model files outside the Systran organisation, pinned to the revision that was checked.
+WHISPER_REPOS = {"large-v3-turbo": ("mobiuslabsgmbh/faster-whisper-large-v3-turbo", "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf")}
+WHISPER_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.*", "preprocessor_config.json")
 QWEN_MODELS = ("qwen3:1.7b", "qwen3:4b-instruct", "qwen3:8b")
 AUDIO_TYPES = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".webm", ".mp4", ".aiff", ".aif"}
 LOCK = threading.RLock()
 
 
 class Settings(BaseModel):
-    whisper_model: Literal["base", "small", "medium", "large-v3"] = "small"
-    whisper_device: Literal["auto", "cpu", "cuda"] = "auto"
+    settings_version: int = 2
+    whisper_model: Literal["large-v3-turbo", "large-v3", "medium", "small", "base"] = "large-v3-turbo"
+    whisper_device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     whisper_compute: Literal["auto", "int8", "int8_float16", "float16"] = "auto"
     language: Literal["ko", "en", "ja", "zh", "auto"] = "ko"
     llm_model: str = Field(default="qwen3:4b-instruct", max_length=100, pattern=r"^[a-zA-Z0-9_.:-]+$")
@@ -60,6 +64,10 @@ class Settings(BaseModel):
 DEFAULT_PROMPTS = {
     "일반 요약": "다음 대화를 핵심 내용 중심으로 정리하세요.\n## 주요 내용\n## 중요한 사실\n## 후속 조치",
     "회의록": "다음 회의를 회의록으로 정리하세요.\n## 회의 주제\n## 논의 내용\n## 결정 사항\n## 할 일 및 담당자\n## 다음 일정",
+}
+# Formats the app used to ship. A saved copy is removed only while it is still the untouched original;
+# one the user rewrote is theirs and stays.
+RETIRED_PROMPTS = {
     "진료 기록": "다음 진료 대화를 기록으로 정리하세요.\n## 주호소 및 증상\n## 시작 시점과 경과\n## 병력\n## 복용약\n## 설명한 내용\n## 계획\n진단을 새로 내리거나 치료를 제안하지 마세요.",
     "법률 상담": "다음 법률 상담 대화를 기록으로 정리하세요.\n## 사건 개요\n## 사실관계\n## 쟁점\n## 의뢰인 요청\n## 향후 조치\n법률적 판단이나 조언을 새로 추가하지 마세요.",
 }
@@ -83,7 +91,20 @@ def load_json(path: Path, default):
 VAULT = Vault(DATA)
 EMPTY_STATE = {"files": [], "transcript": "", "summary": ""}
 STATE = copy.deepcopy(EMPTY_STATE)
-CONFIG = Settings(**load_json(DATA / "settings.json", {}))
+
+
+def load_settings():
+    raw = load_json(DATA / "settings.json", {})
+    if raw and raw.get("settings_version", 1) < 2:
+        # large-v3-turbo replaced small as the default; move installs still on the old default.
+        if raw.get("whisper_model", "small") == "small":
+            raw["whisper_model"] = "large-v3-turbo"
+        raw["settings_version"] = 2
+        (DATA / "settings.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    return Settings(**raw)
+
+
+CONFIG = load_settings()
 PROMPTS = copy.deepcopy(DEFAULT_PROMPTS)
 REPLACEMENTS = []
 
@@ -108,9 +129,20 @@ def load_private():
     STATE = VAULT.load_json(DATA / "workspace.json", copy.deepcopy(EMPTY_STATE))
     PROMPTS = VAULT.load_json(DATA / "prompts.json", copy.deepcopy(DEFAULT_PROMPTS))
     REPLACEMENTS = VAULT.load_json(DATA / "replacements.json", [])
+    retired = [name for name, text in RETIRED_PROMPTS.items() if PROMPTS.get(name) == text]
+    if retired and len(PROMPTS) > len(retired):
+        for name in retired:
+            del PROMPTS[name]
+        write_json(DATA / "prompts.json", PROMPTS)
     for item in STATE["files"]:
         if item["status"] == "Processing":
             item["status"] = "Pending"
+        if not item.get("created"):
+            # Recordings added before dates were kept: use when the stored audio was written.
+            try:
+                item["created"] = int(VAULT.encrypted(RECORDINGS / item["stored_name"]).stat().st_mtime)
+            except OSError:
+                pass
     persist()
 
 
@@ -200,7 +232,9 @@ def start_job(kind, worker):
     with LOCK:
         require_idle()
         RT.cancel = threading.Event()
-        RT.job = {"id": uuid.uuid4().hex, "type": kind, "status": "running", "message": "준비 중…", "progress": None}
+        # target: the recording being worked on ("notes" for the shared memo); stage: "stt" or "summary".
+        RT.job = {"id": uuid.uuid4().hex, "type": kind, "status": "running", "message": "준비 중…", "progress": None,
+                  "target": None, "stage": None}
         job = copy.deepcopy(RT.job)
 
     def run():
@@ -247,38 +281,54 @@ def model_installed(name=None):
     return all((model_path(name) / f).is_file() for f in ("model.bin", "config.json", "tokenizer.json"))
 
 
-def ensure_whisper():
-    key = (CONFIG.whisper_model, CONFIG.whisper_device, CONFIG.whisper_compute)
+def whisper_device():
+    """Pick where Whisper runs: NVIDIA GPU, Apple GPU (Metal), or CPU."""
+    import ctranslate2
+    wanted = CONFIG.whisper_device
+    if wanted in ("auto", "cuda") and ctranslate2.get_cuda_device_count() > 0:
+        return "cuda"
+    if wanted in ("auto", "mps") and platform.system() == "Darwin" and platform.machine() == "arm64":
+        try:
+            if "float16" in ctranslate2.get_supported_compute_types("mps"):
+                return "mps"
+        except Exception:
+            pass
+    return "cpu"
+
+
+def ensure_whisper(force_cpu=False):
+    key = (CONFIG.whisper_model, CONFIG.whisper_device, CONFIG.whisper_compute, force_cpu)
     if RT.model is not None and RT.model_key == key:
         return RT.model
     if not model_installed():
-        raise RuntimeError("Whisper 모델이 없습니다. 설정의 모델 및 음성 인식 설정에서 모델 준비를 눌러 주세요.")
+        raise RuntimeError("음성 인식 모델이 아직 없습니다. 설정에서 ‘모델 준비’를 눌러 주세요.")
     from faster_whisper import WhisperModel
-    import ctranslate2
 
-    device = "cpu"
-    if CONFIG.whisper_device != "cpu" and ctranslate2.get_cuda_device_count() > 0:
-        device = "cuda"
-    compute = CONFIG.whisper_compute
-    if compute == "auto":
-        compute = "float16" if device == "cuda" else "int8"
-    fallback = CONFIG.whisper_device == "cuda" and device == "cpu"
-    if device == "cpu" and compute in ("float16", "int8_float16"):
-        compute = "int8"
-    RT.model_status = {"state": "loading", "message": "Whisper 모델을 메모리에 불러오는 중…", "device": None}
+    device = "cpu" if force_cpu else whisper_device()
+    fallback = force_cpu or (CONFIG.whisper_device in ("cuda", "mps") and device == "cpu")
+
+    def load(device):
+        compute = CONFIG.whisper_compute
+        if compute == "auto" or (device == "cpu" and compute in ("float16", "int8_float16")):
+            compute = "int8" if device == "cpu" else "float16"
+        model = WhisperModel(str(model_path()), device=device, compute_type=compute,
+                             cpu_threads=min(8, os.cpu_count() or 4), local_files_only=True)
+        return model, compute
+
+    RT.model = None
+    RT.model_status = {"state": "loading", "message": "음성 인식 모델을 불러오는 중…", "device": None}
     try:
-        RT.model = WhisperModel(str(model_path()), device=device, compute_type=compute,
-                                cpu_threads=min(8, os.cpu_count() or 4), local_files_only=True)
+        RT.model, compute = load(device)
     except Exception:
-        if device != "cuda":
-            RT.model_status = {"state": "error", "message": "Whisper 모델 로딩 실패", "device": None}
+        if device == "cpu":
+            RT.model_status = {"state": "error", "message": "음성 인식 모델을 불러오지 못했습니다.", "device": None}
             raise
-        device, compute, fallback = "cpu", "int8", True
-        RT.model = WhisperModel(str(model_path()), device=device, compute_type=compute,
-                                cpu_threads=min(8, os.cpu_count() or 4), local_files_only=True)
+        device, fallback = "cpu", True
+        RT.model, compute = load(device)
     RT.model_key = key
-    device_text = f"{device.upper()} ({compute})"
-    RT.model_status = {"state": "ready", "message": "CPU로 자동 전환했습니다." if fallback else "STT model ready.", "device": device_text}
+    names = {"cpu": "CPU", "mps": "Apple GPU", "cuda": "NVIDIA GPU"}
+    RT.model_status = {"state": "ready", "message": "CPU로 자동 전환했습니다." if fallback else "음성 인식 모델 준비됨",
+                       "device": f"{names[device]} ({compute})", "kind": device}
     return RT.model
 
 
@@ -464,6 +514,7 @@ def get_state(refresh: bool = False):
 
 class TextUpdate(BaseModel):
     file_id: str | None = None
+    name: str | None = Field(default=None, max_length=120)
     transcript: str | None = Field(default=None, max_length=300000)
     summary: str | None = Field(default=None, max_length=300000)
 
@@ -481,6 +532,11 @@ def update_text(body: TextUpdate):
         for key in ("transcript", "summary"):
             if (value := getattr(body, key)) is not None:
                 target[key] = value
+        if body.file_id and body.name is not None:
+            name = " ".join(re.sub(r"[\\/\x00-\x1f]", " ", body.name).split())
+            if not name:
+                raise HTTPException(400, "기록 이름을 입력하세요.")
+            target["name"] = name
         persist()
     return {"ok": True}
 
@@ -561,13 +617,26 @@ def add_files(files: list[UploadFile] = File(...), recording: bool = Form(False)
             raise HTTPException(400, f"{name}: 읽을 수 없는 오디오입니다. {str(exc)[:160]}") from exc
         finally:
             upload.file.close()
-        item = {"id": item_id, "name": name, "stored_name": path.name, "duration": duration,
-                "status": "Pending", "selected": True, "error": None, "transcript": ""}
+        item = {"id": item_id, "name": name, "stored_name": path.name, "duration": duration, "created": int(time.time()),
+                "status": "Pending", "selected": True, "error": None, "transcript": "", "summary": ""}
         with LOCK:
             STATE["files"].append(item)
             persist()
         added.append(item)
     return {"files": added}
+
+
+class ViewUpdate(BaseModel):
+    view: Literal["list", "calendar"]
+
+
+@app.put("/api/view")
+def save_view(body: ViewUpdate):
+    """Remember whether the record list is shown as a list or as a calendar."""
+    with LOCK:
+        STATE["view"] = body.view
+        persist()
+    return {"ok": True}
 
 
 class FileSelection(BaseModel):
@@ -598,6 +667,52 @@ class TranscriptionRequest(BaseModel):
     ids: list[str] | None = None
 
 
+def transcribe_item(item, on_progress=lambda value: None):
+    """Transcribe one recording into its own transcript; returns the text."""
+    with LOCK:
+        item.update(status="Processing", error=None)
+    try:
+        model = ensure_whisper()
+        while True:
+            check_cancel()
+            try:
+                with VAULT.open(RECORDINGS / item["stored_name"]) as audio:
+                    segments, info = model.transcribe(audio,
+                                                      language=None if CONFIG.language == "auto" else CONFIG.language,
+                                                      beam_size=5, vad_filter=True, condition_on_previous_text=False)
+                parts = []
+                for segment in segments:
+                    check_cancel()
+                    parts.append(segment.text.strip())
+                    if info.duration:
+                        on_progress(min(segment.end / info.duration, 0.99))
+                break
+            except InterruptedError:
+                raise
+            except Exception:
+                # The Apple GPU backend is experimental: run this recording once more on the CPU.
+                if RT.model_status.get("kind") != "mps":
+                    raise
+                model = ensure_whisper(force_cpu=True)
+        check_cancel()
+        text = " ".join(part for part in parts if part)
+        with LOCK:
+            item.update(status="Completed", transcript=text)
+            block = f"[{item['name']}]\n{text}" if text else f"[{item['name']}]\n(인식된 음성 없음)"
+            STATE["transcript"] = (STATE["transcript"].rstrip() + "\n\n" + block).lstrip()
+            persist()
+        return text
+    except InterruptedError:
+        with LOCK:
+            item["status"] = "Pending"
+        raise
+    except Exception as exc:
+        with LOCK:
+            item.update(status="Error", error=error_message(exc))
+            persist()
+        raise
+
+
 @app.post("/api/transcribe")
 def transcribe(file_id: str | None = None, body: TranscriptionRequest | None = None):
     with LOCK:
@@ -610,56 +725,35 @@ def transcribe(file_id: str | None = None, body: TranscriptionRequest | None = N
         else:
             selected = [f for f in STATE["files"] if f["selected"]]
         if not selected:
-            raise HTTPException(400, "변환할 파일을 선택하세요.")
+            raise HTTPException(400, "받아쓸 기록을 선택하세요.")
         if not model_installed():
-            raise HTTPException(400, "먼저 설정에서 Whisper 모델을 준비하세요.")
+            raise HTTPException(400, "음성 인식 모델이 아직 없습니다. 설정에서 ‘모델 준비’를 눌러 주세요.")
 
     def worker():
-        model = ensure_whisper()
-        check_cancel()
-        failures = 0
+        total, failures = len(selected), 0
         for index, item in enumerate(selected):
             check_cancel()
-            with LOCK:
-                item.update(status="Processing", error=None)
-            job_update(message=f"{item['name']} processing… ({index + 1}/{len(selected)})", progress=index / len(selected))
+            job_update(message="받아쓰는 중…" + (f" ({index + 1}/{total})" if total > 1 else ""),
+                       progress=index / total, target=item["id"], stage="stt")
             try:
-                with VAULT.open(RECORDINGS / item["stored_name"]) as audio:
-                    segments, info = model.transcribe(audio,
-                                                  language=None if CONFIG.language == "auto" else CONFIG.language,
-                                                  beam_size=5, vad_filter=True, condition_on_previous_text=False)
-                parts = []
-                for segment in segments:
-                    check_cancel()
-                    parts.append(segment.text.strip())
-                    if info.duration:
-                        progress = (index + min(segment.end / info.duration, 0.99)) / len(selected)
-                        job_update(progress=progress)
-                check_cancel()
-                text = " ".join(part for part in parts if part)
-                with LOCK:
-                    item.update(status="Completed", transcript=text)
-                    block = f"[{item['name']}]\n{text}" if text else f"[{item['name']}]\n(인식된 음성 없음)"
-                    STATE["transcript"] = (STATE["transcript"].rstrip() + "\n\n" + block).lstrip()
-                    persist()
+                transcribe_item(item, lambda value: job_update(progress=(index + value) / total))
             except InterruptedError:
-                with LOCK:
-                    item["status"] = "Pending"
                 raise
-            except Exception as exc:
+            except Exception:
+                if total == 1:
+                    raise
                 failures += 1
-                with LOCK:
-                    item.update(status="Error", error=error_message(exc))
-                persist()
-        job_update(message=f"음성 인식 완료 · {len(selected) - failures}개 완료" + (f", {failures}개 오류" if failures else ""))
+        job_update(message="받아쓰기를 마쳤습니다." if total == 1 else
+                   f"받아쓰기 완료 · {total - failures}개" + (f", {failures}개 실패" if failures else ""))
 
     return start_job("stt", worker)
 
 
 class SummaryRequest(BaseModel):
     file_id: str | None = None
+    ids: list[str] | None = None      # several recordings, one after another
     prompt: str
-    expand_context: bool = False
+    expand_context: bool = False      # accepted from older clients; the context now grows automatically
 
 
 SINGLE_PASS_TOKENS = 12000   # up to ~8,000 Korean chars (~30 min) is summarised in one pass
@@ -712,46 +806,49 @@ def split_for_summary(text, limit, separator="\n"):
     return [chunk for chunk in chunks if chunk.strip()]
 
 
-@app.post("/api/summary")
-def summarize(body: SummaryRequest):
-    with LOCK:
-        require_idle()
-        target = STATE
-        if body.file_id:
-            target = next((f for f in STATE["files"] if f["id"] == body.file_id), None)
-            if target is None:
-                raise HTTPException(404, "녹음을 찾을 수 없습니다.")
-        text = target["transcript"].strip()
-        if not text:
-            raise HTTPException(400, "요약할 받아쓰기 텍스트를 입력하세요.")
-        if body.prompt not in PROMPTS:
-            raise HTTPException(400, "요약 서식을 선택하세요.")
-        template = PROMPTS[body.prompt]
+def summary_parts(text):
+    """Returns (parts to summarise, output token limit). Long meetings are split and merged."""
+    tokens = estimate_tokens(text)
+    chunks = [text] if tokens <= SINGLE_PASS_TOKENS else split_for_summary(text, CHUNK_TOKENS)
+    if len(chunks) > MAX_CHUNKS:
+        raise ValueError(f"텍스트가 너무 깁니다. 최대 약 {MAX_CHUNKS * CHUNK_TOKENS:,} 토큰까지 요약할 수 있습니다.")
+    # Long meetings need longer minutes: allow output up to about half the input size
+    # (never below the user's setting, at most 8,192 tokens).
+    return chunks, max(CONFIG.max_tokens, min(8192, math.ceil(tokens * 0.5 / 256) * 256))
+
+
+def summary_model():
+    """Check the local summary model before a job starts.
+
+    Returns True when a Qwen model needs the raw no-thinking chat template.
+    """
     status = ollama_status(force=True)
     if not status["connected"]:
         raise HTTPException(503, status["error"])
     if CONFIG.llm_model not in status["models"] or CONFIG.llm_model.endswith(":cloud"):
-        raise HTTPException(400, "선택한 로컬 요약 모델이 없습니다. 설정에서 모델 준비를 눌러 주세요.")
+        raise HTTPException(400, "선택한 로컬 요약 모델이 없습니다. 설정에서 ‘모델 준비’를 눌러 주세요.")
     with local_client(5) as client:
         shown = client.post(OLLAMA + "/api/show", json={"model": CONFIG.llm_model})
         shown.raise_for_status()
         metadata = shown.json()
-        if metadata.get("remote_host") or metadata.get("remote_model") or metadata.get("details", {}).get("format") != "gguf":
-            raise HTTPException(400, "이 앱은 이 컴퓨터에 설치된 GGUF 모델만 사용합니다.")
-        if "completion" not in metadata.get("capabilities", []):
-            raise HTTPException(400, "텍스트를 생성할 수 있는 로컬 모델을 선택하세요.")
-        if metadata.get("model_info", {}).get("general.finetune", "").lower() == "thinking":
-            raise HTTPException(400, "추론 전용 모델은 요약 결과만 생성할 수 없습니다. qwen3:4b-instruct를 선택하세요.")
-    raw_qwen = (metadata.get("details", {}).get("family") == "qwen3"
-                and "thinking" in metadata.get("capabilities", [])
-                and metadata.get("model_info", {}).get("general.finetune", "").lower() != "instruct")
-    text_tokens = estimate_tokens(text)
-    chunks = [text] if text_tokens <= SINGLE_PASS_TOKENS else split_for_summary(text, CHUNK_TOKENS)
-    if len(chunks) > MAX_CHUNKS:
-        raise HTTPException(400, f"텍스트가 너무 깁니다. 최대 약 {MAX_CHUNKS * CHUNK_TOKENS:,} 토큰까지 요약할 수 있습니다.")
-    # Long meetings need longer minutes: allow output up to about half the input size
-    # (never below the user's setting, at most 8,192 tokens).
-    final_output = max(CONFIG.max_tokens, min(8192, math.ceil(text_tokens * 0.5 / 256) * 256))
+    if metadata.get("remote_host") or metadata.get("remote_model") or metadata.get("details", {}).get("format") != "gguf":
+        raise HTTPException(400, "이 앱은 이 컴퓨터에 설치된 GGUF 모델만 사용합니다.")
+    if "completion" not in metadata.get("capabilities", []):
+        raise HTTPException(400, "텍스트를 생성할 수 있는 로컬 모델을 선택하세요.")
+    if metadata.get("model_info", {}).get("general.finetune", "").lower() == "thinking":
+        raise HTTPException(400, "추론 전용 모델은 요약 결과만 생성할 수 없습니다. qwen3:4b-instruct를 선택하세요.")
+    return (metadata.get("details", {}).get("family") == "qwen3"
+            and "thinking" in metadata.get("capabilities", [])
+            and metadata.get("model_info", {}).get("general.finetune", "").lower() != "instruct")
+
+
+def run_summary(target, template, raw_qwen, say, progress):
+    """Summarise target["transcript"] into target["summary"] inside the running job.
+
+    Blocks until done and honours cancellation. Returns (number of parts, Ollama done_reason).
+    """
+    text = target["transcript"].strip()
+    chunks, final_output = summary_parts(text)
 
     def payload_for(prompt, num_predict):
         """Ollama request whose context grows automatically to fit prompt + output."""
@@ -800,23 +897,25 @@ def summarize(body: SummaryRequest):
 
     def append(piece):
         with LOCK:
-            target["summary"] += piece
+            target["summary"] = target.get("summary", "") + piece
 
     async def generate():
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=5), trust_env=False) as client:
             if len(chunks) == 1:
-                job_update(message="로컬 LLM이 요약하고 있습니다…")
+                say("요약하는 중…")
+                progress(None)
                 prompt = f"{template}\n\n<대화_원문>\n{text}\n</대화_원문>"
             else:
                 # 1) Note each part, 2) condense notes if still too long, 3) merge into the chosen format.
                 notes, total = [], len(chunks)
                 for index, chunk in enumerate(chunks, 1):
-                    job_update(message=f"긴 회의를 {total}개 구간으로 나눠 정리 중… ({index}/{total})", progress=(index - 1) / (total + 1))
+                    say(f"긴 회의를 {total}개 구간으로 나눠 정리하는 중… ({index}/{total})")
+                    progress((index - 1) / (total + 1))
                     show("\n\n".join(notes) + f"\n\n(구간 {index}/{total} 정리 중…)")
                     note, _ = await run(client, payload_for(CHUNK_PROMPT.format(index=index, total=total, text=chunk), NOTE_TOKENS))
                     notes.append(f"### 구간 {index}/{total}\n{note.strip()}")
                 while estimate_tokens("\n\n".join(notes)) > MERGE_TOKENS:
-                    job_update(message="구간 메모를 한 번 더 압축하고 있습니다…")
+                    say("구간 메모를 한 번 더 줄이는 중…")
                     groups = split_for_summary("\n\n".join(notes), CHUNK_TOKENS, separator="\n\n")
                     condensed = []
                     for group in groups:
@@ -825,16 +924,15 @@ def summarize(body: SummaryRequest):
                     if len(condensed) >= len(notes):
                         break
                     notes = condensed
-                job_update(message=f"{total}개 구간 메모를 하나의 결과로 합치고 있습니다…", progress=total / (total + 1))
+                say(f"{total}개 구간 메모를 하나로 합치는 중…")
+                progress(total / (total + 1))
                 prompt = MERGE_PROMPT.format(template=template, total=total, notes="\n\n".join(notes))
             show("")
             result, reason = await run(client, payload_for(prompt, final_output), append)
         if not result.strip():
             raise RuntimeError("모델이 빈 응답을 반환했습니다. 모델과 입력 텍스트를 확인하세요.")
-        job_update(message="출력 토큰 한도에 도달했습니다. 설정에서 최대 출력 토큰을 늘려 주세요." if reason == "length"
-                   else "요약이 완료되었습니다." + (f" (긴 회의 · {len(chunks)}개 구간)" if len(chunks) > 1 else ""))
         persist()
-        RT.ollama_checked = 0
+        return reason
 
     async def cancellable():
         task = asyncio.create_task(generate())
@@ -843,14 +941,88 @@ def summarize(body: SummaryRequest):
                 await asyncio.wait({task}, timeout=0.08)
                 if RT.cancel.is_set():
                     raise InterruptedError("요약을 중단했습니다.")
-            await task
+            return await task
         finally:
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+    return len(chunks), asyncio.run(cancellable())
+
+
+@app.post("/api/summary")
+def summarize(body: SummaryRequest):
+    """One step for the user: a recording without a transcript is transcribed first, then summarised."""
+    with LOCK:
+        require_idle()
+        if body.prompt not in PROMPTS:
+            raise HTTPException(400, "요약 서식을 선택하세요.")
+        template = PROMPTS[body.prompt]
+        if body.ids is not None:
+            wanted = set(body.ids)
+            targets = [f for f in STATE["files"] if f["id"] in wanted]
+            if not targets:
+                raise HTTPException(400, "요약할 기록을 선택하세요.")
+        elif body.file_id:
+            targets = [f for f in STATE["files"] if f["id"] == body.file_id]
+            if not targets:
+                raise HTTPException(404, "녹음을 찾을 수 없습니다.")
+        else:
+            targets = [STATE]
+            if not STATE["transcript"].strip():
+                raise HTTPException(400, "요약할 텍스트를 입력하세요.")
+        for target in targets:
+            try:
+                summary_parts(target.get("transcript", "").strip())
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        if any(t is not STATE and not t.get("transcript", "").strip() for t in targets) and not model_installed():
+            raise HTTPException(400, "음성 인식 모델이 아직 없습니다. 설정에서 ‘모델 준비’를 눌러 주세요.")
+        STATE["last_prompt"] = body.prompt
+    raw_qwen = summary_model()
+
     def worker():
-        asyncio.run(cancellable())
+        total, failures, outcome = len(targets), 0, (1, None)
+        for index, target in enumerate(targets):
+            check_cancel()
+            is_file = target is not STATE
+            count = f" ({index + 1}/{total})" if total > 1 else ""
+
+            def span(low, high):
+                return lambda value: job_update(
+                    progress=None if value is None else (index + low + (high - low) * value) / total)
+            try:
+                prefix, low = "", 0
+                if is_file and not target.get("transcript", "").strip():
+                    prefix, low = "2/2 ", 0.6
+                    job_update(message=f"1/2 받아쓰는 중…{count}", progress=index / total, target=target["id"], stage="stt")
+                    transcribe_item(target, span(0, low))
+                    if not target["transcript"].strip():
+                        raise RuntimeError("인식된 음성이 없어 요약할 내용이 없습니다.")
+                if is_file:
+                    with LOCK:
+                        target["error"] = None
+                job_update(target=target["id"] if is_file else "notes", stage="summary")
+                outcome = run_summary(target, template, raw_qwen,
+                                      lambda message: job_update(message=prefix + message + count), span(low, 1))
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                if is_file:
+                    with LOCK:
+                        target["error"] = error_message(exc)
+                if total == 1:
+                    raise
+                failures += 1
+        parts, reason = outcome
+        if total > 1:
+            message = f"요약 완료 · {total - failures}개" + (f", {failures}개 실패" if failures else "")
+        elif reason == "length":
+            message = "출력 토큰 한도에 도달했습니다. 설정에서 최대 출력 토큰을 늘려 주세요."
+        else:
+            message = "요약을 마쳤습니다." + (f" (긴 회의 · {parts}개 구간)" if parts > 1 else "")
+        job_update(message=message)
+        RT.ollama_checked = 0
 
     return start_job("summary", worker)
 
@@ -942,6 +1114,38 @@ def save_prompts(body: PromptUpdate):
     return {"ok": True}
 
 
+def download_whisper():
+    """Fetch only the model files, reporting how much has arrived."""
+    from fnmatch import fnmatch
+    from huggingface_hub import HfApi, snapshot_download
+    name, target = CONFIG.whisper_model, model_path()
+    repo, revision = WHISPER_REPOS.get(name, (f"Systran/faster-whisper-{name}", None))
+    job_update(message=f"음성 인식 모델 {name} 내려받는 중…")
+    total = 0
+    try:
+        files = HfApi().model_info(repo, revision=revision, files_metadata=True).siblings
+        total = sum(f.size or 0 for f in files if any(fnmatch(f.rfilename, pattern) for pattern in WHISPER_FILES))
+    except Exception:
+        pass  # progress is optional; the download itself reports real failures
+    finished = threading.Event()
+
+    def watch():
+        while not finished.wait(1):
+            try:
+                received = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
+            except OSError:
+                continue
+            if total:
+                job_update(message=f"음성 인식 모델 {name} 내려받는 중… {received / 1e9:.1f} / {total / 1e9:.1f} GB",
+                           progress=min(received / total, 0.99))
+
+    threading.Thread(target=watch, daemon=True, name="scribe-download").start()
+    try:
+        snapshot_download(repo_id=repo, revision=revision, local_dir=str(target), allow_patterns=list(WHISPER_FILES))
+    finally:
+        finished.set()
+
+
 class PrepareRequest(BaseModel):
     whisper: bool = True
     ollama: bool = True
@@ -956,12 +1160,9 @@ def prepare_models(body: PrepareRequest):
     def worker():
         if body.whisper:
             if not model_installed():
-                job_update(message=f"Whisper {CONFIG.whisper_model} 다운로드 중… (모델 파일만 수신)")
-                from huggingface_hub import snapshot_download
-                snapshot_download(repo_id=f"Systran/faster-whisper-{CONFIG.whisper_model}", local_dir=str(model_path()),
-                                  allow_patterns=["config.json", "model.bin", "tokenizer.json", "vocabulary.*", "preprocessor_config.json"])
+                download_whisper()
             check_cancel()
-            job_update(message="Whisper 모델을 불러오는 중…")
+            job_update(message="음성 인식 모델을 불러오는 중…", progress=None)
             ensure_whisper()
         if body.ollama:
             check_cancel()
@@ -1022,6 +1223,7 @@ def storage_files(kind: Literal["recordings", "results"]):
     with LOCK:
         names = {f["stored_name"]: f["name"] for f in STATE["files"]}
     return {"files": [{"filename": p.name[:-4], "name": names.get(p.name[:-4], p.name[:-4]), "size": p.stat().st_size,
+                       "modified": int(p.stat().st_mtime),
                        "url": f"/api/download/{kind}/{p.name[:-4]}"} for p in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
                       if p.is_file() and p.name.endswith(".enc") and not p.name.startswith(".")]}
 
@@ -1034,6 +1236,8 @@ def download(kind: Literal["recordings", "results"], filename: str, request: Req
         raise HTTPException(404, "파일을 찾을 수 없습니다.")
     with LOCK:
         display = next((f["name"] for f in STATE["files"] if f["stored_name"] == filename), filename)
+    if Path(display).suffix.lower() != Path(filename).suffix.lower():
+        display += Path(filename).suffix   # a renamed recording keeps a playable file extension
     from urllib.parse import quote
     import mimetypes
     # The reader authenticates each block before releasing it; no plaintext temp file.
