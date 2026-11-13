@@ -1,9 +1,8 @@
 /* macOS-style theme for the menu-bar panel (the page is loaded with ?panel=…). */
 html:has(body[data-panel]) {
   --text: rgb(0 0 0 / .85);
-  --secondary: rgb(0 0 0 / .62);
-  --tertiary: rgb(0 0 0 / .56);
-  --hairline: rgb(0 0 0 / .22);
+  --secondary: rgb(0 0 0 / .5);
+  --tertiary: rgb(0 0 0 / .28);
   --separator: rgb(0 0 0 / .1);
   --control: #fff;
   --control-hover: #f6f6f6;
@@ -28,9 +27,8 @@ html:has(body[data-panel]) {
 @media (prefers-color-scheme: dark) {
   html:has(body[data-panel]) {
     --text: rgb(255 255 255 / .86);
-    --secondary: rgb(255 255 255 / .64);
-    --tertiary: rgb(255 255 255 / .5);
-    --hairline: rgb(255 255 255 / .25);
+    --secondary: rgb(255 255 255 / .55);
+    --tertiary: rgb(255 255 255 / .25);
     --separator: rgb(255 255 255 / .1);
     --control: rgb(255 255 255 / .12);
     --control-hover: rgb(255 255 255 / .17);
@@ -75,8 +73,8 @@ body[data-panel] .button {
 body[data-panel] .button:hover:not(:disabled) { background: var(--control-hover); border: 0 }
 body[data-panel] .button:active:not(:disabled) { filter: brightness(.93) }
 body[data-panel] .button .icon { width: 13px; height: 13px; stroke-width: 1.8 }
-body[data-panel] .button.primary { color: #fff; background: color-mix(in srgb, var(--accent) 86%, #000); box-shadow: 0 .5px 1.5px rgb(0 0 0 / .2) }
-body[data-panel] .button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 86%, #000); filter: brightness(1.08) }
+body[data-panel] .button.primary { color: #fff; background: var(--accent); box-shadow: 0 .5px 1.5px rgb(0 0 0 / .2) }
+body[data-panel] .button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.06) }
 body[data-panel] .button.stop { color: var(--red); background: var(--control) }
 body[data-panel] .button:disabled { opacity: .45 }
 body[data-panel] .footer-buttons { gap: 8px }
@@ -131,8 +129,8 @@ body[data-panel] .file-status.Processing:before { background: var(--accent) }
 body[data-panel] .file-status.Error { color: var(--red) }
 body[data-panel] .file-status.Error:before { background: var(--red) }
 body[data-panel] .empty-files { height: 90px; color: var(--secondary) }
-body[data-panel] .empty-files span, body[data-panel] .empty-files small { color: var(--secondary); font-size: 11px; letter-spacing: 0 }
-body[data-panel] .empty-files > .icon { stroke: var(--hairline) }
+body[data-panel] .empty-files span, body[data-panel] .empty-files small { color: var(--tertiary) }
+body[data-panel] .empty-files > .icon { stroke: var(--tertiary) }
 body[data-panel] .dragging .drop-overlay { border: 2px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-size: 15px }
 
 /* ---------- Layout pieces ---------- */
@@ -194,7 +192,7 @@ body[data-panel] .inline-error { background: color-mix(in srgb, var(--red) 12%, 
 body[data-panel] .section-label button { color: var(--accent) }
 body[data-panel] .replace-head { color: var(--secondary) }
 body[data-panel] .replace-rule input { height: 26px }
-body[data-panel] .replace-arrow { color: var(--hairline) }
+body[data-panel] .replace-arrow { color: var(--tertiary) }
 
 /* ---------- Settings screen: grouped list ---------- */
 body[data-panel] #panel-options:not([hidden]) {
@@ -207,7 +205,7 @@ body[data-panel] #panel-options button {
 }
 body[data-panel] #panel-options button:last-child { border-bottom: 0 }
 body[data-panel] #panel-options button:hover { background: var(--zebra) }
-body[data-panel] #panel-options button::after { content: "›"; float: right; color: var(--hairline); font-size: 15px; line-height: 1 }
+body[data-panel] #panel-options button::after { content: "›"; float: right; color: var(--tertiary); font-size: 15px; line-height: 1 }
 
 /* ---------- Workspace layout: files + transcript left, summary right ---------- */
 body[data-panel="workspace"] { overflow: hidden }
@@ -224,24 +222,3 @@ body[data-panel="workspace"] .workspace .files-panel { flex: 0 0 auto }
 body[data-panel="workspace"] .workspace :is(.transcript-panel, .summary-panel) { flex: 1 1 auto }
 body[data-panel="workspace"] .file-table-wrap { max-height: 136px }
 body[data-panel="workspace"] .panel textarea { flex: 1; height: auto; min-height: 80px }
-
-/* Rendered summary: a finished document by default, editable on demand. */
-body[data-panel] .summary-view {
-  flex: 1; min-height: 80px; overflow: auto; padding: 12px 16px; border-radius: 8px;
-  background: var(--field); box-shadow: inset 0 0 0 .5px var(--field-edge);
-  font: 13px/1.65 -apple-system, sans-serif; color: var(--text);
-  -webkit-user-select: text; user-select: text; cursor: text;
-}
-body[data-panel] .summary-view:focus-visible { outline: none; box-shadow: inset 0 0 0 .5px var(--field-edge), 0 0 0 3.5px var(--focus) }
-body[data-panel] .summary-view h3 { margin: 16px 0 4px; font: 600 13px/1.4 -apple-system, sans-serif; color: var(--text) }
-body[data-panel] .summary-view h3:first-child { margin-top: 0 }
-body[data-panel] .summary-view ul { margin: 0 0 4px; padding-left: 18px }
-body[data-panel] .summary-view li { margin: 3px 0 }
-body[data-panel] .summary-view li::marker { color: var(--secondary) }
-body[data-panel] .summary-view p { margin: 4px 0 }
-body[data-panel] ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent) }
-body[data-panel] { caret-color: var(--accent) }
-
-/* The native title bar already reports job status; one status display is enough. */
-body[data-panel="workspace"] .status-bar { display: none }
-body[data-panel="workspace"] .workspace { height: 100vh }

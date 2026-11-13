@@ -14,6 +14,7 @@
 1. Apple Command Line Tools가 없다면 터미널에서 `xcode-select --install`을 실행해 설치를 마칩니다. [Apple 다운로드 안내](https://developer.apple.com/xcode/resources/)
 2. 위 ZIP을 풀고, 해당 폴더에서 `setup.command`를 실행합니다. 터미널에서는 `zsh setup.command`로 실행할 수 있습니다.
 3. 설치 완료 메시지가 나오면 `~/Applications/Local LLM Encoder.app`을 엽니다. Dock에 고정하려면 아이콘 우클릭 → 옵션 → Dock에 유지를 선택합니다.
+4. 패널에서 **Touch ID** 또는 **Mac 로그인 암호로 열기**를 누르고 macOS 인증창에서 인증합니다. 별도 앱 비밀번호는 만들지 않습니다. 기존 보관함은 저장된 키체인 연결을 한 번의 본인 인증으로 전환합니다. [암호화·백업·보호 범위](docs/security.md)
 
 설치 파일은 Python 3.12, 잠긴 Python 의존성, Ollama, Whisper small, Qwen3 4B Instruct를 준비합니다. Python은 [uv의 관리형 Python 다운로드](https://docs.astral.sh/uv/guides/install-python/)를 사용합니다. Ollama가 없으면 공식 `v0.33.3` CLI 배포본을 받아 SHA-256을 확인하고 앱 전용 폴더에 설치합니다. 기존 Ollama가 있으면 그대로 사용합니다. 처음에는 인터넷과 모델 약 3GB 외에 Python 환경·다운로드 임시 공간이 필요합니다.
 
@@ -70,11 +71,11 @@ zsh download-models.command
 
 1. Dock의 **Local LLM Encoder** 또는 `~/Applications/Local LLM Encoder.app`을 엽니다.
 2. 메뉴 막대의 마이크 아이콘을 누르면 아이콘 아래에 작업 패널이 열립니다. 위쪽에서 녹음하고, 왼쪽에서 녹음 파일·받아쓰기, 오른쪽에서 요약을 다룹니다.
-3. 받아쓰기·요약의 잘못 인식된 말은 **일괄 수정**으로 한 번에 고칠 수 있습니다. 긴 회의는 자동으로 구간을 나눠 요약합니다.
+3. 요약 탭의 **일괄 수정**은 현재 열어 둔 요약 본문에만 적용됩니다. 원문·다른 기록·앞으로 생성하는 내용에는 자동 적용하지 않습니다. 긴 회의는 자동으로 구간을 나눠 요약합니다.
 
 메뉴에서 환경설정, 서버 시작·중지·재시작, 현재 작업 중단, 녹음·결과 폴더 열기, 로그 보기를 사용할 수 있습니다. 작업 중에는 서버 중지·재시작·모두 종료가 비활성화되므로 먼저 **현재 작업 중단**을 누르세요. **컨트롤러만 종료**는 서버를 유지하고, **모두 종료**는 이 프로젝트가 시작한 서버와 Ollama를 함께 종료합니다. 기존에 실행 중이던 Ollama는 종료하지 않습니다.
 
-패널 창을 닫아도 메뉴 막대 아이콘은 유지됩니다. 아이콘이나 Dock 아이콘을 누르면 패널이 다시 열립니다. 브라우저에서 **http://localhost:18765** 로 열 수도 있습니다. 자동 로그인 실행은 설정하지 않습니다.
+패널 창을 닫아도 메뉴 막대 아이콘은 유지됩니다. 아이콘이나 Dock 아이콘을 누르면 패널이 다시 열립니다. **http://localhost:18765**를 브라우저로 열면 Mac 앱으로 이동하는 안내가 표시됩니다. 녹음·메모 접근과 본인 인증은 Mac 앱에서만 제공합니다. 자동 로그인 실행은 설정하지 않습니다.
 
 `start.command`는 서버와 메뉴 컨트롤러를 실행하며, `stop.command`는 서버를 중지합니다. 메뉴 컨트롤러를 다시 빌드·설치하려면 메뉴에서 **모두 종료**를 누른 뒤 `install-menubar.command`를 실행합니다. 빌드에는 Apple Command Line Tools가 필요합니다. 실행 코드와 데이터는 `~/Library/Application Support/Azimuth Scribe Local/`에 설치되므로 앱 실행에 문서 폴더 접근 권한은 필요하지 않습니다. 다시 설치해도 기존 설치의 데이터는 유지합니다.
 
@@ -90,12 +91,11 @@ python3 launcher.py --stop
 
 ## 사용
 
-- **STEP 1 / Record:** 마이크 권한을 허용하고 Start record → Stop record를 누릅니다. 브라우저가 캡처한 오디오를 이 localhost 서버에서 16 kHz 모노 WAV로 변환해 저장합니다. 전송 실패 시 녹음을 메모리에 유지하고 다시 저장할 수 있습니다.
-- **STEP 2 / Record Files:** Add 또는 드래그로 음성 파일을 추가합니다. 체크한 파일만 목록 순서대로 STT 처리합니다. Delete는 목록에서만 제거하며 보관된 파일은 남습니다.
-- **STEP 3 / STT result:** 이름·약 이름·숫자 등의 오인식을 직접 수정하거나 텍스트를 붙여 넣습니다. Stop을 누르면 현재 구간 처리 후 중단하고, 완료된 파일의 결과는 보존합니다.
-- **STEP 4 / Summary:** 일반 요약·회의록·진료 기록·법률 상담 서식을 선택합니다. Ollama가 생성하는 내용을 실시간으로 표시하며, Stop을 누르면 생성된 부분까지 남습니다. Copy to Clipboard와 TXT/Markdown 저장을 지원합니다.
-- **Settings:** 요약 모델·실행 장치·컨텍스트 길이·출력 길이·온도, Whisper 모델·장치·연산 방식·언어를 설정합니다. 사용자 요약 서식도 편집할 수 있습니다.
-- **File:** 받아쓰기·요약 저장과 Results/Recordings 파일 목록을 제공합니다. 웹앱이므로 폴더 메뉴는 브라우저 안에서 해당 폴더의 파일을 보여줍니다.
+- **녹음·파일 추가:** 메뉴 막대에서 녹음 시작 → 녹음 종료를 누르거나, 기록 화면의 파일 추가·드래그로 음성을 가져옵니다. 녹음은 localhost에서 16 kHz 모노 WAV로 변환해 저장합니다. 전송 실패 시 녹음을 메모리에 유지하고 다시 저장할 수 있습니다.
+- **기록 카드:** 왼쪽 메뉴와 오른쪽 카드 목록에서 파일명·원문·요약을 검색합니다. 카드 안에서 음성 재생, 원문·요약 전환, 복사, 기록 정보, 목록 제거를 할 수 있습니다. 목록에서 제거해도 보관된 음성 파일은 남습니다.
+- **다시 처리:** 카드 메뉴에서 해당 음성의 받아쓰기 또는 일반 요약·회의록·진료 기록·법률 상담을 실행합니다. 위쪽 받아쓰기는 화면에 보이는 선택 항목을 일괄 처리합니다. 중단하면 완료된 결과는 남습니다.
+- **편집·내보내기:** 카드의 제목이나 편집을 누르면 해당 기록의 원문·요약을 넓게 편집합니다. 내용은 자동 저장됩니다. 저장 버튼은 선택한 기록의 TXT·Markdown을 암호화해 보관하며, 일반 파일 내보내기도 선택할 수 있습니다. ‘전체 메모’는 받아쓰기 합본과 직접 입력하는 메모를 위한 별도 공간입니다.
+- **설정·서식:** 왼쪽 메뉴에서 모델·언어·실행 장치와 요약 서식을 편집합니다. 저장한 결과와 녹음 파일은 파일 보관함에서 확인할 수 있습니다.
 
 입력 텍스트, 요약, 파일 목록, 설정, 요약 서식은 앱의 데이터 폴더에 자동 저장되고 재실행 후 복원됩니다.
 
@@ -115,20 +115,27 @@ python3 launcher.py --stop
 
 | 경로 | 내용 |
 | --- | --- |
-| `data/Recordings/` | 녹음 및 불러온 음성 파일 사본 |
-| `data/Results/` | 저장한 TXT·Markdown 결과 |
-| `data/workspace.json` | 파일 목록, 받아쓰기, 요약 |
+| `data/Recordings/*.enc` | 암호화된 녹음 및 불러온 음성 파일 사본 |
+| `data/Results/*.enc` | 암호화된 TXT·Markdown 결과 |
+| `data/workspace.json.enc` | 암호화된 파일 목록, 받아쓰기, 요약 |
+| `data/vault.json` | 키체인에 저장한 무작위 비밀값으로 암호화한 보관함 키와 메타데이터 |
 | `data/settings.json` | 모델과 언어 설정 |
-| `data/prompts.json` | 사용자 요약 서식 |
+| `data/prompts.json.enc`, `data/replacements.json.enc` | 암호화된 사용자 서식과 일괄 수정 규칙 |
 | `data/models/` | Whisper 모델 |
 | `data/server.log`, `data/ollama.log` | 이 실행기가 시작한 프로세스의 로그 |
 | `.venv/`, `.bootstrap/` | 전용 Python 환경과 부트스트랩 도구 |
 | `.vendor/ollama-0.33.3/` | 기존 Ollama가 없을 때 설치하는 공식 CLI와 라이브러리 |
 | `~/.ollama/models/` | Ollama의 로컬 모델 (기존 Ollama와 공유) |
 
-백업 시 `data/`를 복사합니다. 앱에서 파일을 목록에서 제거해도 보관된 음성은 남습니다. 필요한 보관·삭제는 이 폴더에서 직접 관리할 수 있습니다. 화면에는 예시 녹음이나 가상의 요약을 넣지 않았습니다.
+백업 시 서버를 중지하고 `vault.json`을 포함한 `data/` 전체를 복사합니다. 복원에는 해당 보관함의 Mac 키체인 항목도 필요하며, Mac 로그인 암호만으로 새 Mac에서 복구할 수 없습니다. 목록에서 제거해도 암호화된 음성은 남습니다. 기존에 가져온 원본·이전 백업은 자동으로 변경하지 않습니다. [보호 범위와 복구 안내](docs/security.md)를 확인하세요.
 
 ## 검증
+
+암호화 저장·검증 이관·잠금 후 API 차단·자동 잠금은 임시 데이터로 검사합니다.
+
+```sh
+.venv/bin/python tests/vault-smoke.py
+```
 
 실제 로컬 모델로 한국어 합성 음성을 변환하고 요약하는 통합 검증입니다. 테스트 데이터는 임시 폴더에만 만들고 실제 작업 데이터를 수정하지 않습니다. macOS의 `say`와 이미 준비된 모델이 필요합니다. 소스 폴더에 개발용 Python 환경이 없다면 먼저 `python3 bootstrap.py --python-only`를 실행합니다.
 
@@ -152,6 +159,8 @@ python3 tests/install-smoke.py
 ```
 
 ## 구현
+
+화면 구성과 후속 개선 방향은 [디자인·UI/UX 참고 조사](docs/ui-ux-references.md)에 정리했습니다.
 
 빌드 과정 없는 HTML/CSS/JavaScript와 FastAPI/Python 서버를 사용합니다. 받아쓰기는 faster-whisper, 파일 디코딩·WAV 저장은 PyAV, 요약은 `127.0.0.1:11434`의 Ollama API가 수행합니다. 의존성은 `requirements-lock.txt`에 고정했습니다. PyAV 19의 API 변경과 faster-whisper 1.2.1의 호환 문제를 피하기 위해 검증한 PyAV 16.1.0을 사용합니다.
 

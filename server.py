@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -21,10 +22,12 @@ os.environ.setdefault("DO_NOT_TRACK", "1")
 import av
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from vault import Vault, VaultError, COOKIE, IDLE_SECONDS, BLOCK
+from native_auth import NativeAuthServer
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("SCRIBE_DATA_DIR", str(ROOT / "data"))).resolve()
@@ -77,16 +80,18 @@ def load_json(path: Path, default):
         raise RuntimeError(f"{path.name}을 읽을 수 없습니다. 원본을 보존한 뒤 파일을 확인하세요.") from exc
 
 
-STATE = load_json(DATA / "workspace.json", {"files": [], "transcript": "", "summary": ""})
+VAULT = Vault(DATA)
+EMPTY_STATE = {"files": [], "transcript": "", "summary": ""}
+STATE = copy.deepcopy(EMPTY_STATE)
 CONFIG = Settings(**load_json(DATA / "settings.json", {}))
-PROMPTS = load_json(DATA / "prompts.json", DEFAULT_PROMPTS)
-REPLACEMENTS = load_json(DATA / "replacements.json", [])
-for item in STATE["files"]:
-    if item["status"] == "Processing":
-        item["status"] = "Pending"
+PROMPTS = copy.deepcopy(DEFAULT_PROMPTS)
+REPLACEMENTS = []
 
 
 def write_json(path: Path, value):
+    if path.name in ("workspace.json", "prompts.json", "replacements.json"):
+        VAULT.save_json(path, value)
+        return
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(path)
@@ -94,7 +99,38 @@ def write_json(path: Path, value):
 
 def persist():
     with LOCK:
-        write_json(DATA / "workspace.json", STATE)
+        if VAULT._key is not None:
+            write_json(DATA / "workspace.json", STATE)
+
+
+def load_private():
+    global STATE, PROMPTS, REPLACEMENTS
+    STATE = VAULT.load_json(DATA / "workspace.json", copy.deepcopy(EMPTY_STATE))
+    PROMPTS = VAULT.load_json(DATA / "prompts.json", copy.deepcopy(DEFAULT_PROMPTS))
+    REPLACEMENTS = VAULT.load_json(DATA / "replacements.json", [])
+    for item in STATE["files"]:
+        if item["status"] == "Processing":
+            item["status"] = "Pending"
+    persist()
+
+
+def finish_lock():
+    global STATE, PROMPTS, REPLACEMENTS
+    VAULT.lock()
+    STATE = copy.deepcopy(EMPTY_STATE)
+    PROMPTS = copy.deepcopy(DEFAULT_PROMPTS)
+    REPLACEMENTS = []
+    RT.job = None
+
+
+def request_lock():
+    with LOCK:
+        VAULT.closing = True
+        VAULT.sessions.clear()
+        if busy():
+            RT.cancel.set()
+        elif RT.private_requests == 0:
+            finish_lock()
 
 
 def replacement_pattern(find):
@@ -103,10 +139,10 @@ def replacement_pattern(find):
     return re.compile(r"\s*".join(re.escape(c) for c in chars)) if chars else None
 
 
-def apply_replacements(text, rules=None):
+def apply_replacements(text, rules):
     """Apply batch-correction rules in order; returns (new_text, number_of_replacements)."""
     count = 0
-    for rule in REPLACEMENTS if rules is None else rules:
+    for rule in rules:
         pattern = replacement_pattern(rule["find"])
         if pattern and text:
             text, n = pattern.subn(lambda _match, value=rule["replace"]: value, text)
@@ -127,6 +163,7 @@ def qwen_without_thinking(system, prompt):
 
 
 class Runtime:
+    private_requests = 0
     job: dict | None = None
     cancel = threading.Event()
     model = None
@@ -179,7 +216,10 @@ def start_job(kind, worker):
             else:
                 job_update(status="error", message=error_message(exc), progress=None)
         finally:
-            persist()
+            with LOCK:
+                persist()
+                if VAULT.closing and RT.private_requests == 0:
+                    finish_lock()
 
     threading.Thread(target=run, daemon=True, name=f"scribe-{kind}").start()
     return job
@@ -261,7 +301,26 @@ def ollama_status(force=False):
     return result
 
 
-app = FastAPI(title="Azimuth Scribe Local", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(_app):
+    async def monitor():
+        while True:
+            await asyncio.sleep(1)
+            with LOCK:
+                if VAULT.unlocked and not busy() and time.monotonic() - VAULT.last_activity >= IDLE_SECONDS:
+                    request_lock()
+    native_channel.start()
+    task = asyncio.create_task(monitor())
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        request_lock()
+        native_channel.stop()
+
+
+app = FastAPI(title="Azimuth Scribe Local", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]"])
 
 
@@ -278,7 +337,28 @@ async def local_boundary(request: Request, call_next):
             return JSONResponse({"detail": "동일한 localhost 화면에서만 요청할 수 있습니다."}, 403)
         if request.headers.get("x-scribe-request") != "1":
             return JSONResponse({"detail": "로컬 앱 요청 헤더가 필요합니다."}, 403)
-    response = await call_next(request)
+    public = {"/api/health", "/api/vault/status", "/api/vault/setup", "/api/vault/unlock",
+              "/api/models/prepare", "/api/models/status"}
+    private = request.url.path.startswith("/api/") and request.url.path not in public
+    if private:
+        with LOCK:
+            if VAULT.unlocked and not busy() and time.monotonic() - VAULT.last_activity >= IDLE_SECONDS:
+                request_lock()
+            token = request.headers.get("authorization", "").removeprefix("Bearer ") or request.cookies.get(COOKIE)
+            if not VAULT.authorized(token):
+                return JSONResponse({"detail": "보관함 잠금을 해제하세요."}, 423 if not VAULT.unlocked else 401,
+                                    headers={"Cache-Control": "no-store"})
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                VAULT.touch()
+            RT.private_requests += 1
+    try:
+        response = await call_next(request)
+    finally:
+        if private:
+            with LOCK:
+                RT.private_requests -= 1
+                if VAULT.closing and RT.private_requests == 0 and not busy():
+                    finish_lock()
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cache-Control"] = "no-store"
@@ -289,6 +369,86 @@ async def local_boundary(request: Request, call_next):
 @app.get("/api/health")
 def health():
     return {"app": "azimuth-scribe-local", "root": str(ROOT)}
+
+
+@app.exception_handler(VaultError)
+async def vault_error(_request, error):
+    return JSONResponse({"detail": str(error)}, 400, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/vault/status")
+def vault_status(request: Request):
+    with LOCK:
+        if VAULT.unlocked and not busy() and time.monotonic() - VAULT.last_activity >= IDLE_SECONDS:
+            request_lock()
+        token = request.headers.get("authorization", "").removeprefix("Bearer ") or request.cookies.get(COOKIE)
+        return {**VAULT.status(), "locked": not VAULT.authorized(token)}
+
+
+def open_native_vault(body):
+    with LOCK:
+        if body.get("action") == "lock":
+            request_lock()
+            return VAULT.status()
+        require_idle()
+        if VAULT.closing:
+            raise VaultError("현재 작업을 마무리하고 잠그는 중입니다. 잠시 후 다시 시도하세요.")
+        action, secret, identity = body.get("action"), body.get("secret"), body.get("id")
+        VAULT._native_secret(secret)
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity):
+            raise VaultError("보관함 식별자가 올바르지 않습니다.")
+        if VAULT.meta and identity != VAULT.meta["id"]:
+            raise VaultError("다른 보관함의 인증 요청입니다.")
+        was_unlocked = VAULT.unlocked
+        try:
+            if action == "initialize" and not VAULT.meta:
+                VAULT.setup(secret, identity=identity, native=True)
+            elif action == "migrate" and VAULT.meta and VAULT.meta.get("auth_mode") != "macos":
+                legacy = body.get("legacy_secret")
+                if not isinstance(legacy, str) or not 1 <= len(legacy) <= 256:
+                    raise VaultError("기존 키체인 연결을 확인하세요.")
+                VAULT.adopt_native(legacy, secret)
+            elif action == "unlock" and VAULT.meta and VAULT.meta.get("auth_mode") == "macos":
+                VAULT.unlock(secret)
+            else:
+                raise VaultError("Mac 앱에서 보관함 상태를 새로 확인한 뒤 인증하세요.")
+            if not was_unlocked:
+                VAULT.migrate()
+                load_private()
+            session = VAULT.new_session()
+        except Exception:
+            if not was_unlocked:
+                finish_lock()
+            raise
+        return {**VAULT.status(), "session": session}
+
+
+native_channel = NativeAuthServer(DATA, open_native_vault)
+
+
+@app.post("/api/vault/setup")
+@app.post("/api/vault/unlock")
+def password_login_disabled():
+    return JSONResponse({"detail": "별도 비밀번호 로그인은 사용할 수 없습니다. Mac 앱에서 Touch ID 또는 Mac 로그인 암호로 인증하세요."}, 410)
+
+
+@app.post("/api/vault/lock")
+def lock_vault():
+    request_lock()
+    response = JSONResponse(VAULT.status())
+    response.delete_cookie(COOKIE)
+    return response
+
+
+@app.post("/api/vault/touch")
+def touch_vault():
+    return {"ok": True}
+
+
+@app.get("/api/models/status")
+def model_setup_status():
+    with LOCK:
+        return {"job": copy.deepcopy(RT.job) if RT.job and RT.job["type"] == "setup" else None}
 
 
 @app.get("/api/state")
@@ -303,6 +463,7 @@ def get_state(refresh: bool = False):
 
 
 class TextUpdate(BaseModel):
+    file_id: str | None = None
     transcript: str | None = Field(default=None, max_length=300000)
     summary: str | None = Field(default=None, max_length=300000)
 
@@ -312,8 +473,14 @@ def update_text(body: TextUpdate):
     with LOCK:
         if busy():
             raise HTTPException(409, "작업이 끝난 뒤 텍스트를 수정하세요.")
-        for key, value in body.model_dump(exclude_none=True).items():
-            STATE[key] = value
+        target = STATE
+        if body.file_id:
+            target = next((f for f in STATE["files"] if f["id"] == body.file_id), None)
+            if target is None:
+                raise HTTPException(404, "녹음을 찾을 수 없습니다.")
+        for key in ("transcript", "summary"):
+            if (value := getattr(body, key)) is not None:
+                target[key] = value
         persist()
     return {"ok": True}
 
@@ -386,13 +553,15 @@ def add_files(files: list[UploadFile] = File(...), recording: bool = Form(False)
                     path.unlink()
                     path = wav_path
                 name = Path(name).stem + ".wav"
+            duration = audio_duration(path)
+            VAULT.import_file(path)
         except Exception as exc:
             path.unlink(missing_ok=True)
             (RECORDINGS / f"{item_id}.wav").unlink(missing_ok=True)
             raise HTTPException(400, f"{name}: 읽을 수 없는 오디오입니다. {str(exc)[:160]}") from exc
         finally:
             upload.file.close()
-        item = {"id": item_id, "name": name, "stored_name": path.name, "duration": audio_duration(path),
+        item = {"id": item_id, "name": name, "stored_name": path.name, "duration": duration,
                 "status": "Pending", "selected": True, "error": None, "transcript": ""}
         with LOCK:
             STATE["files"].append(item)
@@ -425,11 +594,21 @@ def remove_files(body: FileSelection):
     return {"ok": True}
 
 
+class TranscriptionRequest(BaseModel):
+    ids: list[str] | None = None
+
+
 @app.post("/api/transcribe")
-def transcribe(file_id: str | None = None):
+def transcribe(file_id: str | None = None, body: TranscriptionRequest | None = None):
     with LOCK:
         require_idle()
-        selected = [f for f in STATE["files"] if (f["id"] == file_id if file_id else f["selected"])]
+        ids = set(body.ids) if body and body.ids is not None else None
+        if file_id:
+            selected = [f for f in STATE["files"] if f["id"] == file_id]
+        elif ids is not None:
+            selected = [f for f in STATE["files"] if f["id"] in ids]
+        else:
+            selected = [f for f in STATE["files"] if f["selected"]]
         if not selected:
             raise HTTPException(400, "변환할 파일을 선택하세요.")
         if not model_installed():
@@ -445,7 +624,8 @@ def transcribe(file_id: str | None = None):
                 item.update(status="Processing", error=None)
             job_update(message=f"{item['name']} processing… ({index + 1}/{len(selected)})", progress=index / len(selected))
             try:
-                segments, info = model.transcribe(str(RECORDINGS / item["stored_name"]),
+                with VAULT.open(RECORDINGS / item["stored_name"]) as audio:
+                    segments, info = model.transcribe(audio,
                                                   language=None if CONFIG.language == "auto" else CONFIG.language,
                                                   beam_size=5, vad_filter=True, condition_on_previous_text=False)
                 parts = []
@@ -456,7 +636,7 @@ def transcribe(file_id: str | None = None):
                         progress = (index + min(segment.end / info.duration, 0.99)) / len(selected)
                         job_update(progress=progress)
                 check_cancel()
-                text, _ = apply_replacements(" ".join(part for part in parts if part))
+                text = " ".join(part for part in parts if part)
                 with LOCK:
                     item.update(status="Completed", transcript=text)
                     block = f"[{item['name']}]\n{text}" if text else f"[{item['name']}]\n(인식된 음성 없음)"
@@ -653,8 +833,6 @@ def summarize(body: SummaryRequest):
             raise RuntimeError("모델이 빈 응답을 반환했습니다. 모델과 입력 텍스트를 확인하세요.")
         job_update(message="출력 토큰 한도에 도달했습니다. 설정에서 최대 출력 토큰을 늘려 주세요." if reason == "length"
                    else "요약이 완료되었습니다." + (f" (긴 회의 · {len(chunks)}개 구간)" if len(chunks) > 1 else ""))
-        with LOCK:
-            target["summary"], _ = apply_replacements(target["summary"])
         persist()
         RT.ollama_checked = 0
 
@@ -727,16 +905,25 @@ def save_replacements(body: ReplacementUpdate):
     return {"ok": True, "rules": REPLACEMENTS}
 
 
+class SummaryReplacement(ReplacementUpdate):
+    file_id: str | None = Field(..., min_length=1, max_length=128)
+    rules: list[Replacement] = Field(min_length=1, max_length=200)
+
+
 @app.post("/api/replacements/apply")
-def apply_saved_replacements():
+def apply_summary_replacements(body: SummaryReplacement):
     with LOCK:
         if busy():
             raise HTTPException(409, "작업이 끝난 뒤 일괄 수정하세요.")
-        counts = {}
-        for key in ("transcript", "summary"):
-            STATE[key], counts[key] = apply_replacements(STATE[key])
+        target = STATE
+        if body.file_id is not None:
+            target = next((file for file in STATE["files"] if file["id"] == body.file_id), None)
+            if target is None:
+                raise HTTPException(404, "수정할 요약의 기록을 찾을 수 없습니다.")
+        rules = [{"find": rule.find, "replace": rule.replace} for rule in body.rules]
+        target["summary"], count = apply_replacements(target.get("summary", ""), rules)
         persist()
-    return {"count": counts["transcript"] + counts["summary"], **counts}
+        return {"file_id": body.file_id, "summary": target["summary"], "count": count}
 
 
 class PromptUpdate(BaseModel):
@@ -807,6 +994,7 @@ def prepare_models(body: PrepareRequest):
 
 
 class ExportRequest(BaseModel):
+    file_id: str | None = None
     kind: Literal["transcript", "summary"]
     format: Literal["txt", "md"] = "txt"
 
@@ -814,12 +1002,17 @@ class ExportRequest(BaseModel):
 @app.post("/api/export")
 def export_result(body: ExportRequest):
     with LOCK:
-        text = STATE[body.kind]
+        target = STATE
+        if body.file_id:
+            target = next((f for f in STATE["files"] if f["id"] == body.file_id), None)
+            if target is None:
+                raise HTTPException(404, "녹음을 찾을 수 없습니다.")
+        text = target.get(body.kind, "")
     if not text.strip():
         raise HTTPException(400, "저장할 내용이 없습니다.")
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
     filename = f"{stamp}_{'stt' if body.kind == 'transcript' else 'summary'}.{body.format}"
-    (RESULTS / filename).write_text(text, encoding="utf-8")
+    VAULT.write_bytes(RESULTS / filename, text.encode("utf-8"))
     return {"filename": filename, "url": f"/api/download/results/{filename}"}
 
 
@@ -828,19 +1021,63 @@ def storage_files(kind: Literal["recordings", "results"]):
     folder = RECORDINGS if kind == "recordings" else RESULTS
     with LOCK:
         names = {f["stored_name"]: f["name"] for f in STATE["files"]}
-    return {"files": [{"filename": p.name, "name": names.get(p.name, p.name), "size": p.stat().st_size,
-                       "url": f"/api/download/{kind}/{p.name}"} for p in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True) if p.is_file()]}
+    return {"files": [{"filename": p.name[:-4], "name": names.get(p.name[:-4], p.name[:-4]), "size": p.stat().st_size,
+                       "url": f"/api/download/{kind}/{p.name[:-4]}"} for p in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                      if p.is_file() and p.name.endswith(".enc") and not p.name.startswith(".")]}
 
 
 @app.get("/api/download/{kind}/{filename}")
-def download(kind: Literal["recordings", "results"], filename: str):
+def download(kind: Literal["recordings", "results"], filename: str, request: Request):
     folder = RECORDINGS if kind == "recordings" else RESULTS
     path = (folder / filename).resolve()
-    if path.parent != folder or not path.is_file():
+    if path.parent != folder or not VAULT.encrypted(path).is_file():
         raise HTTPException(404, "파일을 찾을 수 없습니다.")
     with LOCK:
         display = next((f["name"] for f in STATE["files"] if f["stored_name"] == filename), filename)
-    return FileResponse(path, filename=display)
+    from urllib.parse import quote
+    import mimetypes
+    # The reader authenticates each block before releasing it; no plaintext temp file.
+    source = VAULT.open(path)
+    total, start, end, status = source.size, 0, source.size - 1, 200
+    headers = {"Accept-Ranges": "bytes", "Content-Disposition": "attachment; filename*=UTF-8''" + quote(display, safe="")}
+    requested = request.headers.get("range", "")
+    # A single byte range supports WebKit's initial probe and audio seeking.
+    # Unsupported range units/multiple ranges fall back to the full representation.
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested)
+    if match:
+        first, last = match.groups()
+        try:
+            first = int(first) if first else None
+            last = int(last) if last else None
+        except ValueError:
+            source.close()
+            raise HTTPException(416, "요청한 재생 범위가 없습니다.", headers={"Content-Range": f"bytes */{total}"})
+        if first is not None:
+            start, end = first, min(last, total - 1) if last is not None else total - 1
+        elif last is not None and last > 0:
+            start = max(0, total - last)
+        else:
+            start = total
+        if start >= total or end < start:
+            source.close()
+            raise HTTPException(416, "요청한 재생 범위가 없습니다.", headers={"Content-Range": f"bytes */{total}"})
+        status = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    headers["Content-Length"] = str(max(0, end - start + 1))
+    source.seek(start)
+    token = request.headers.get("authorization", "").removeprefix("Bearer ") or request.cookies.get(COOKIE)
+    def content():
+        try:
+            remaining = max(0, end - start + 1)
+            while remaining and VAULT.authorized(token):
+                part = source.read(min(BLOCK, remaining))
+                if not part or not VAULT.authorized(token):
+                    break
+                remaining -= len(part)
+                yield part
+        finally:
+            source.close()
+    return StreamingResponse(content(), status_code=status, media_type=mimetypes.guess_type(display)[0] or "application/octet-stream", headers=headers)
 
 
 @app.get("/")

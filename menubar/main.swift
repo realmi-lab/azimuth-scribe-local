@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import AVFoundation
 import Foundation
+import LocalAuthentication
 
 struct Health: Decodable { let app: String; let root: String }
 struct AppState: Decodable {
@@ -29,6 +30,10 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var operation: String?
     private var lastError: String?
     private var quitting = false
+    private var vaultSession: String?
+    private var vaultStatus: VaultStatus?
+    private var vaultGeneration = 0
+    private var authContext: LAContext?
     private var window: NSPanel!
     private let panel = PanelModel()
     private lazy var workspace = Workspace(base: base)
@@ -45,7 +50,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         base = URL(string: "http://127.0.0.1:\(info["ScribePort"] as? Int ?? 18765)")!
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 2
-        configuration.timeoutIntervalForResource = 4
+        configuration.timeoutIntervalForResource = 600
         configuration.connectionProxyDictionary = [:]
         configuration.httpShouldSetCookies = false
         session = URLSession(configuration: configuration)
@@ -53,6 +58,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private var working: Bool {
+        if vaultStatus?.locking == true { return true }
         guard let status = state?.runtime.job?.status else { return false }
         return connected && ["running", "stopping"].contains(status)
     }
@@ -83,6 +89,11 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.cancel = { [weak self] in self?.cancelWork(nil) }
         panel.openFolder = { [weak self] path in self?.openFolder(path) }
         panel.quit = { [weak self] in self?.quitEverything(nil) }
+        panel.lockVault = { [weak self] in self?.lockVault() }
+        workspace.onVaultMessage = { [weak self] in self?.handleVaultMessage($0) }
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenLocked), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenLocked), name: NSWorkspace.willSleepNotification, object: nil)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenLocked), name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
         panel.help = { [weak self] in self?.workspace.web.evaluateJavaScript("document.getElementById('help-button').click()") }
         window = makeWindow()
         let mainMenu = NSMenu()
@@ -97,6 +108,10 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showPanel()
         return false
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if urls.contains(where: { $0.scheme == "localllmencoder" && $0.host == "open" }) { showPanel() }
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
@@ -129,6 +144,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         item("패널 열기", #selector(openProgram(_:)), tag: 10, key: "o")
         item("설정…", #selector(openSettings(_:)), tag: 11, key: ",")
+        item("보관함 잠그기", #selector(lockFromMenu(_:)), tag: 12, key: "l")
         menu.addItem(.separator())
         item("서버 시작", #selector(toggleServer(_:)), tag: 20)
         item("서버 다시 시작", #selector(restartServer(_:)), tag: 22)
@@ -168,6 +184,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 entry.isEnabled = false
             case 10: entry.isEnabled = operation == nil
             case 11: entry.isEnabled = operation == nil && connected
+            case 12: entry.isEnabled = connected && !panel.vaultLocked
             case 20:
                 entry.title = connected ? "서버 중지" : "서버 시작"
                 entry.isEnabled = operation == nil && (!connected || !working)
@@ -182,6 +199,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateMenus() {
         panel.connected = connected
+        panel.vaultLocked = vaultStatus?.locked ?? true
         panel.working = working
         panel.job = state?.runtime.job?.message ?? ""
         panel.failed = state?.runtime.job?.status == "error"
@@ -268,7 +286,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             uploadRecording()
             return
         }
-        guard !panel.busy, connected, !working else { return }
+        guard !panel.busy, connected, !working, !panel.vaultLocked else { return }
         if panel.pending { uploadRecording(); return }
         panel.busy = true
         AVCaptureDevice.requestAccess(for: .audio) { granted in DispatchQueue.main.async {
@@ -298,14 +316,18 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Multipart upload through curl; returns the clips the server created.
     private func postFiles(_ parts: [String], recording: Bool) throws -> [Clip] {
-        let proc = Process(), pipe = Pipe()
+        guard let token = vaultSession else { return [] }
+        let proc = Process(), pipe = Pipe(), headers = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        proc.arguments = ["--noproxy", "*", "-fsS", "-H", "X-Scribe-Request: 1"]
+        proc.arguments = ["--noproxy", "*", "-fsS", "-H", "@-"]
             + parts.flatMap { ["-F", "files=@" + $0] }
             + (recording ? ["-F", "recording=true"] : [])
             + [base.appendingPathComponent("api/files").absoluteString]
         proc.standardOutput = pipe
+        proc.standardInput = headers
         try proc.run()
+        headers.fileHandleForWriting.write(Data("X-Scribe-Request: 1\nAuthorization: Bearer \(token)\n".utf8))
+        try headers.fileHandleForWriting.close()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else { return [] }
@@ -339,8 +361,9 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func request(_ path: String, body: [String: Any]? = nil, completion: @escaping (Data?, Error?) -> Void) {
         var request = URLRequest(url: URL(string: "/" + path, relativeTo: base)!.absoluteURL)
+        if let token = vaultSession { request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization") }
         if let body = body {
-            request.timeoutInterval = 30
+            request.timeoutInterval = path.hasPrefix("api/vault/") ? 600 : 30
             request.httpMethod = "POST"
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -357,8 +380,10 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refresh() {
         if checking || operation != nil { return }
         checking = true
+        let generation = vaultGeneration
         request("api/health") { [weak self] data, _ in
             guard let self = self else { return }
+            guard generation == self.vaultGeneration else { self.checking = false; return }
             guard let data = data, let health = try? JSONDecoder().decode(Health.self, from: data),
                   health.app == "azimuth-scribe-local", URL(fileURLWithPath: health.root).resolvingSymlinksInPath() == self.root else {
                 self.connected = false
@@ -367,13 +392,24 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.updateMenus()
                 return
             }
-            self.request("api/state") { [weak self] data, _ in
+            self.request("api/vault/status") { [weak self] data, _ in
                 guard let self = self else { return }
-                self.state = data.flatMap { try? JSONDecoder().decode(AppState.self, from: $0) }
-                self.connected = self.state != nil
-                self.checking = false
-                if self.connected { self.lastError = nil }
-                self.updateMenus()
+                guard generation == self.vaultGeneration else { self.checking = false; return }
+                self.vaultStatus = data.flatMap { try? JSONDecoder().decode(VaultStatus.self, from: $0) }
+                self.connected = self.vaultStatus != nil
+                if self.vaultStatus?.locked != false {
+                    if self.vaultSession != nil { self.clearPrivateSession() }
+                    self.state = nil; self.checking = false; self.updateMenus(); return
+                }
+                self.request("api/state") { [weak self] data, _ in
+                    guard let self else { return }
+                    guard generation == self.vaultGeneration else { self.checking = false; return }
+                    self.state = data.flatMap { try? JSONDecoder().decode(AppState.self, from: $0) }
+                    self.checking = false
+                    if self.state != nil { self.lastError = nil }
+                    self.updateMenus()
+                    if self.panel.recording || self.working { self.request("api/vault/touch", body: [:]) { _, _ in } }
+                }
             }
         }
     }
@@ -463,6 +499,97 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func handleVaultMessage(_ message: [String: Any]) {
+        switch message["action"] as? String {
+        case "authenticate":
+            guard let method = message["method"] as? String, ["touchid", "password"].contains(method) else { return }
+            unlockUsingKeychain(method: method)
+        case "locked": clearPrivateSession(); refresh()
+        case "export":
+            guard let path = message["url"] as? String,
+                  (path.hasPrefix("/api/download/results/") || path.hasPrefix("/api/download/recordings/")),
+                  !path.contains(".."), let name = message["filename"] as? String,
+                  name == URL(fileURLWithPath: name).lastPathComponent else { return }
+            let picker = NSSavePanel()
+            picker.nameFieldStringValue = name
+            picker.message = "이 위치에는 암호화가 해제된 일반 파일을 저장합니다."
+            picker.begin { [weak self] result in
+                guard result == .OK, let destination = picker.url, let self else { return }
+                self.request(String(path.dropFirst())) { data, error in
+                    guard let data else { self.showError(error?.localizedDescription ?? "파일을 읽을 수 없습니다."); return }
+                    do {
+                        try data.write(to: destination, options: .atomic)
+                        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+                    } catch { self.showError(error.localizedDescription) }
+                }
+            }
+        default: break
+        }
+    }
+
+    private func unlockUsingKeychain(method: String) {
+        guard let status = vaultStatus, connected, !panel.busy, authContext == nil else { return }
+        let context = LAContext(), generation = vaultGeneration
+        authContext = context
+        panel.busy = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try VaultKeychain.open(status: status, method: method, context: context, root: self.root)
+                guard let token = result["session"] as? String else { throw NativeVaultChannel.failure("보관함 세션을 받지 못했습니다.") }
+                DispatchQueue.main.async {
+                    self.authContext = nil
+                    guard generation == self.vaultGeneration else {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            _ = try? NativeVaultChannel.call(["action": "lock"], root: self.root)
+                            DispatchQueue.main.async { self.panel.busy = false; self.refresh() }
+                        }
+                        return
+                    }
+                    self.panel.busy = false
+                    self.vaultSession = token
+                    self.vaultGeneration += 1
+                    self.workspace.setSession(token) { self.refresh() }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.authContext = nil; self.panel.busy = false
+                    if generation == self.vaultGeneration { self.workspace.report(error.localizedDescription) }
+                }
+            }
+        }
+    }
+
+    private func clearPrivateSession() {
+        vaultGeneration += 1
+        vaultSession = nil
+        state = nil
+        panel.job = ""; panel.notice = ""; panel.failed = false
+        vaultStatus = VaultStatus(initialized: vaultStatus?.initialized ?? true, locked: true, locking: false, id: vaultStatus?.id, authMode: vaultStatus?.authMode)
+        panel.vaultLocked = true
+        workspace.clearPrivate()
+    }
+
+    @objc private func lockFromMenu(_ sender: Any?) { lockVault() }
+    @objc private func screenLocked() { lockVault() }
+
+    private func lockVault(completion: (() -> Void)? = nil) {
+        if let context = authContext { context.invalidate(); vaultGeneration += 1 }
+        if let recorder {
+            recorder.stop(); self.recorder = nil; meterTimer?.invalidate()
+            panel.recording = false; panel.pending = true; statusItem.button?.title = ""
+        }
+        guard vaultSession != nil else { completion?(); return }
+        workspace.prepareLock { [weak self] in
+            guard let self else { return }
+            self.request("api/vault/lock", body: [:]) { _, error in
+                if let error { self.lastError = error.localizedDescription }
+                self.refresh(); completion?()
+            }
+            self.clearPrivateSession()
+        }
+    }
+
     private func openFolder(_ relative: String) {
         let folder = root.appendingPathComponent(relative)
         do {
@@ -480,9 +607,8 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func quitController(_ sender: Any?) {
-        guard !panel.recording && !panel.busy else { return }
-        quitting = true
-        NSApp.terminate(nil)
+        guard !panel.recording && !panel.busy && !working else { return }
+        lockVault { [weak self] in self?.quitting = true; NSApp.terminate(nil) }
     }
 
     @objc private func quitEverything(_ sender: Any?) {

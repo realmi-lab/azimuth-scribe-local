@@ -22,7 +22,7 @@ def ensure_python(root, sync=False):
     python = root / ".venv" / "bin" / "python"
     if python.exists() and not sync:
         check = subprocess.run([str(python), "-c",
-                                "import sys,fastapi,uvicorn,faster_whisper,multipart,httpx; "
+                                "import sys,fastapi,uvicorn,faster_whisper,multipart,httpx,cryptography; "
                                 "assert sys.version_info[:2] == (3,12)"], capture_output=True)
         if check.returncode == 0:
             return python

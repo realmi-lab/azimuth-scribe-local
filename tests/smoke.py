@@ -3,6 +3,7 @@
 Run: .venv/bin/python tests/smoke.py
 Requires macOS 'say', the prepared Whisper small model and local qwen3:4b-instruct.
 """
+import io
 import json
 import os
 from pathlib import Path
@@ -51,8 +52,14 @@ def main():
         browser_audio(audio, browser_inputs[1], "aac")
         env = {**os.environ, "SCRIBE_DATA_DIR": str(folder), "SCRIBE_PORT": "8766"}
         log = (folder / "server.log").open("w")
-        process = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, stdout=log, stderr=log)
+        server_command = [sys.executable, str(ROOT / "tests/native-fixture.py"), "serve"]
+        process = subprocess.Popen(server_command, env=env, stdout=log, stderr=log)
         client = httpx.Client(base_url=URL, headers=HEADERS, trust_env=False, timeout=15)
+
+        def authenticate_fixture():
+            result = subprocess.run([sys.executable, str(ROOT / "tests/native-fixture.py"), "unlock"],
+                                    env=env, capture_output=True, text=True, check=True)
+            client.cookies.set("scribe_vault", json.loads(result.stdout)["session"])
 
         def request(method, path, **kwargs):
             response = client.request(method, path, **kwargs)
@@ -80,9 +87,10 @@ def main():
 
         try:
             wait_ready()
+            authenticate_fixture()
             assert request("GET", "/api/state")["files"] == []
             page = client.get("/")
-            assert page.status_code == 200 and "STEP 4 : Local LLM Summary" in page.text
+            assert page.status_code == 200 and 'id="history-view"' in page.text
             assert "connect-src 'self'" in page.headers["content-security-policy"]
             assert client.patch("/api/text", json={"transcript": "x"}, headers={"Origin": "https://example.com"}).status_code == 403
             print("PASS: localhost boundary and application assets", flush=True)
@@ -93,7 +101,7 @@ def main():
                     result = request("POST", "/api/files", files={"files": (browser_input.name, source, "application/octet-stream")}, data={"recording": "true"})
                 items.append(result["files"][0])
             first, second = items
-            with av.open(str(folder / "Recordings" / first["stored_name"])) as container:
+            with av.open(io.BytesIO(client.get(f"/api/download/recordings/{first['stored_name']}").content)) as container:
                 assert container.streams.audio[0].codec_context.sample_rate == 16000
                 assert container.streams.audio[0].codec_context.layout.nb_channels == 1
             assert first["duration"] > 0 and first["name"].endswith(".wav")
@@ -132,10 +140,12 @@ def main():
             for fmt in ("txt", "md"):
                 output = request("POST", "/api/export", json={"kind": "summary", "format": fmt})
                 assert client.get(output["url"]).text == summary
-                assert (folder / "Results" / output["filename"]).read_text() == summary
+                assert (folder / "Results" / (output["filename"] + ".enc")).is_file()
+                assert client.get(output["url"]).text == summary
             print("PASS: real Qwen summary, edited transcript, TXT/Markdown exports", flush=True)
             print("SUMMARY:", summary[:350], flush=True)
 
+            request("PATCH", "/api/text", json={"summary": ""})
             request("POST", "/api/summary", json={"prompt": "일반 요약"})
             for _ in range(240):
                 state = request("GET", "/api/state")
@@ -157,8 +167,10 @@ def main():
             assert client.get(f"/api/download/recordings/{second['stored_name']}").status_code == 200
             before = request("GET", "/api/state")
             process.terminate(); process.wait(timeout=10)
-            process = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, stdout=log, stderr=log)
+            process = subprocess.Popen(server_command, env=env, stdout=log, stderr=log)
             wait_ready()
+            assert client.get("/api/state").status_code == 423
+            authenticate_fixture()
             after = request("GET", "/api/state")
             assert after["transcript"] == before["transcript"] and after["summary"] == before["summary"]
             assert after["prompts"] == prompts and after["settings"]["temperature"] == 0.1

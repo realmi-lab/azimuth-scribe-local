@@ -3,18 +3,69 @@ import WebKit
 import UniformTypeIdentifiers
 
 /// Embedded web view for the large workspace (files, transcript, summary) and settings screens.
-final class Workspace: NSObject, WKUIDelegate, WKNavigationDelegate {
-    let web = WKWebView()
+final class Workspace: NSObject, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
+    let web: WKWebView
     let base: URL
     private(set) var page = ""
     private var ready = false
+    var onVaultMessage: ([String: Any]) -> Void = { _ in }
 
     init(base: URL) {
         self.base = base
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        web = WKWebView(frame: .zero, configuration: configuration)
         super.init()
+        configuration.userContentController.add(self, name: "scribeVault")
         web.uiDelegate = self
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        let origin = message.frameInfo.securityOrigin
+        guard message.frameInfo.isMainFrame, origin.protocol == base.scheme, origin.host == base.host,
+              origin.port == base.port, let body = message.body as? [String: Any] else { return }
+        onVaultMessage(body)
+    }
+
+    func setSession(_ token: String, completion: @escaping () -> Void) {
+        guard let cookie = HTTPCookie(properties: [.name: "scribe_vault", .value: token, .domain: base.host!, .path: "/",
+                                                  HTTPCookiePropertyKey("HttpOnly"): "TRUE", HTTPCookiePropertyKey("SameSite"): "Strict"]) else { return }
+        web.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { [weak self] in
+            self?.web.reload()
+            completion()
+        }
+    }
+
+    func prepareLock(_ completion: @escaping () -> Void) {
+        guard ready else { completion(); return }
+        var completed = false
+        let finish = { if !completed { completed = true; completion() } }
+        web.callAsyncJavaScript("if (window.flushBeforeVaultLock) await window.flushBeforeVaultLock();", arguments: [:], in: nil, in: .page) { _ in finish() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: finish)
+    }
+
+    func clearPrivate() {
+        ready = false
+        web.isHidden = true
+        web.stopLoading()
+        let store = web.configuration.websiteDataStore.httpCookieStore
+        store.getAllCookies { [weak self] cookies in
+            let group = DispatchGroup()
+            for cookie in cookies {
+                group.enter(); store.delete(cookie) { group.leave() }
+            }
+            group.notify(queue: .main) {
+                guard let self else { return }
+                self.ready = false
+                self.web.load(URLRequest(url: self.base.appending(queryItems: [URLQueryItem(name: "panel", value: self.page)])))
+            }
+        }
+    }
+
+    func report(_ message: String) {
+        web.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('vault-native-error', {detail: message}))", arguments: ["message": message], in: nil, in: .page) { _ in }
     }
 
     func show(_ page: String) {
@@ -28,6 +79,7 @@ final class Workspace: NSObject, WKUIDelegate, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        web.isHidden = false
         ready = true
         displayPage()
     }

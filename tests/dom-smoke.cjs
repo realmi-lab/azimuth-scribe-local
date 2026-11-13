@@ -4,16 +4,18 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const {spawn} = require("node:child_process");
+const {spawn, execFile} = require("node:child_process");
+const run = require("node:util").promisify(execFile);
 const {JSDOM, VirtualConsole} = require("jsdom");
 const root = path.resolve(__dirname, "..");
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), "scribe-dom-"));
 const base = "http://127.0.0.1:8767";
 const log = fs.openSync(path.join(folder, "server.log"), "w");
-const child = spawn(path.join(root, ".venv/bin/python"), [path.join(root, "server.py")], {
-  env: {...process.env, SCRIBE_DATA_DIR: folder, SCRIBE_PORT: "8767"}, stdio: ["ignore", log, log]
+const env = {...process.env, SCRIBE_DATA_DIR: folder, SCRIBE_PORT: "8767"};
+const child = spawn(path.join(root, ".venv/bin/python"), [path.join(root, "tests/native-fixture.py"), "serve"], {
+  env, stdio: ["ignore", log, log]
 });
-let dom;
+let dom, authCookie = "";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, message, limit = 10000) {
   const end = Date.now() + limit;
@@ -23,7 +25,7 @@ async function until(predicate, message, limit = 10000) {
   }
   throw new Error(`Timeout: ${message}`);
 }
-async function readState() { return (await fetch(base + "/api/state")).json(); }
+async function readState() { return (await fetch(base + "/api/state", {headers: {Cookie: authCookie}})).json(); }
 async function main() {
   await until(async () => { try { return (await fetch(base + "/api/health")).ok; } catch { return false; } }, "test server readiness");
   const errors = [], downloads = [];
@@ -33,17 +35,155 @@ async function main() {
     url: base, runScripts: "outside-only", pretendToBeVisual: true, virtualConsole: console
   });
   const w = dom.window, d = w.document, $ = id => d.getElementById(id);
-  w.fetch = (url, options) => fetch(new URL(url, base), options);
+  w.fetch = async (url, options = {}) => {
+    const response = await fetch(new URL(url, base), {...options, headers: {...options.headers, Cookie: authCookie}});
+    const cookie = response.headers.get("set-cookie");
+    if (cookie) authCookie = cookie.split(";")[0];
+    return response;
+  };
   w.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
   w.HTMLDialogElement.prototype.close = function() { this.open = false; };
   w.HTMLAnchorElement.prototype.click = function() { downloads.push(this.href); };
   w.addEventListener("error", e => errors.push(e.error));
-  w.eval(fs.readFileSync(path.join(root, "static/app.js"), "utf8"));
+  const copied = [];
+  Object.defineProperty(w.navigator, "clipboard", {value: {writeText: async value => copied.push(value)}});
+  w.eval(["vault.js", "app.js", "history.js", "panel.js"].map(name => fs.readFileSync(path.join(root, "static", name), "utf8")).join("\n"));
+  await until(() => $("vault-title").textContent.includes("Mac 앱"), "browser requires Mac app");
+  assert.equal(d.body.classList.contains("vault-locked"), true);
+  assert.equal(d.querySelectorAll('input[type="password"]').length, 0);
+  assert.equal($("vault-touchid").hidden, true);
+  assert.equal($("vault-open-app").hidden, false);
+  assert.equal((await fetch(base + "/api/state")).status, 423);
+  assert.equal((await fetch(base + "/api/vault/setup", {method:"POST", headers:{"X-Scribe-Request":"1"}})).status, 410);
+  const bridgeMessages = [];
+  let cancelNext = true;
+  // Simulate the already-authenticated boundary only in a disposable fixture.
+  // The production controller's LocalAuthentication is checked on the Mac.
+  w.webkit = {messageHandlers:{scribeVault:{postMessage: async message => {
+    bridgeMessages.push(message);
+    if (message.action === "export") { downloads.push(new URL(message.url, base).href); return; }
+    if (message.action !== "authenticate") return;
+    if (cancelNext) {
+      cancelNext = false;
+      w.dispatchEvent(new w.CustomEvent("vault-native-error", {detail:"인증을 취소했습니다. 보관함은 잠겨 있습니다."}));
+      return;
+    }
+    try {
+      const result = await run(path.join(root, ".venv/bin/python"), [path.join(root, "tests/native-fixture.py"), "unlock"], {env});
+      authCookie = "scribe_vault=" + JSON.parse(result.stdout).session;
+      w.dispatchEvent(new w.Event("hashchange"));
+    } catch (error) { w.dispatchEvent(new w.CustomEvent("vault-native-error", {detail:error.message})); }
+  }}}};
+  w.dispatchEvent(new w.Event("hashchange"));
+  await until(() => !$("vault-touchid").hidden, "native authentication controls");
+  assert.equal($("vault-open-app").hidden, true);
+  $("vault-touchid").click();
+  await until(() => $("vault-error").textContent.includes("취소"), "authentication cancel keeps vault locked");
+  assert.equal($("vault-gate").hidden, false);
+  assert.equal((await fetch(base + "/api/state")).status, 423);
+  $("vault-mac-password").click();
+  await until(() => $("vault-gate").hidden, "Mac authentication opens vault");
+  assert.deepEqual(bridgeMessages.filter(m => m.action === "authenticate").map(m => m.method), ["touchid", "password"]);
+  process.stdout.write("PASS: browser gate, no app password, native auth choices and cancel/retry flow\n");
   await until(() => $("app-status").textContent.includes("모델"), "initial DOM render");
-  assert.equal($("file-count").textContent, "0 files");
+  assert.equal($("file-count").textContent, "0개");
   assert.equal($("prompt-select").options.length, 4);
   assert.equal($("stt-button").disabled, true);
+  assert.equal(d.querySelector('.app-sidebar [data-action="replace"]'), null);
+  assert.equal($("transcript-panel").querySelector("[data-open-replace]"), null);
+  assert.equal(d.querySelectorAll("[data-open-replace]").length, 1);
   process.stdout.write("PASS: initial UI state, empty file list, four prompt choices\n");
+  const realFetch = w.fetch;
+  w.fetch = async (url, options) => {
+    const response = await realFetch(url, options);
+    if (String(url).startsWith("/api/state")) {
+      const snapshot = await response.json();
+      snapshot.runtime.job = {id: "visible-cancel", type: "summary", status: "running", message: "요약 중"};
+      return {ok: true, status: 200, json: async () => snapshot};
+    }
+    return response;
+  };
+  w.dispatchEvent(new w.Event("hashchange"));
+  await until(() => $("stt-button").textContent.includes("중단"), "history exposes summary cancellation");
+  assert.equal($("stt-button").disabled, false);
+  assert.equal($("summary-button").disabled, false);
+  w.fetch = realFetch; w.dispatchEvent(new w.Event("hashchange"));
+  await until(() => $("stt-button").textContent.includes("받아쓰기"), "idle controls restored");
+  const wav = Buffer.alloc(32044);
+  wav.write("RIFF", 0); wav.writeUInt32LE(32036, 4); wav.write("WAVEfmt ", 8);
+  wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+  wav.write("data", 36); wav.writeUInt32LE(32000, 40);
+  const upload = new FormData(); upload.append("files", new Blob([wav], {type: "audio/wav"}), "회의자료.wav");
+  const added = await (await fetch(base + "/api/files", {method: "POST", headers: {Cookie: authCookie, "X-Scribe-Request": "1"}, body: upload})).json();
+  const fileId = added.files[0].id;
+  await fetch(base + "/api/text", {method: "PATCH", headers: {Cookie: authCookie, "X-Scribe-Request": "1", "Content-Type": "application/json"}, body: JSON.stringify({file_id: fileId, transcript: "카드 원문에만 있는 검색단어", summary: "녹음별 요약 내용"})});
+  w.dispatchEvent(new w.Event("hashchange"));
+  await until(() => $("file-list").querySelector(".card-text")?.textContent.includes("검색단어"), "recording card render");
+  const card = $("file-list").querySelector(".history-card"), audioNode = card.querySelector("audio");
+  assert.ok(audioNode.src.includes("/api/download/recordings/"));
+  $("history-search").value = "검색단어"; $("history-search").dispatchEvent(new w.Event("input"));
+  assert.equal(card.hidden, false);
+  $("history-search").value = "검색결과없는단어"; $("history-search").dispatchEvent(new w.Event("input"));
+  assert.equal(card.hidden, true); assert.equal($("no-search-results").hidden, false);
+  assert.equal($("stt-button").disabled, true, "hidden selections cannot start a filtered batch");
+  $("history-search").value = ""; $("history-search").dispatchEvent(new w.Event("input"));
+  card.querySelector('[data-tab="summary"]').click();
+  assert.equal(card.querySelector(".card-text").textContent, "녹음별 요약 내용");
+  card.querySelector(".card-copy").click(); await until(() => copied.length === 1, "card summary copy");
+  assert.equal(copied[0], "녹음별 요약 내용");
+  const selectCard = card.querySelector('input[type="checkbox"]'); selectCard.checked = false;
+  selectCard.dispatchEvent(new w.Event("change"));
+  await until(async () => !(await readState()).files[0].selected, "card selection saved");
+  await until(() => $("file-count").textContent === "1개", "selection render");
+  assert.equal(card.querySelector("audio"), audioNode, "polling preserves the player element");
+  assert.equal(card.querySelectorAll(".summary-choices button").length, 4);
+  card.querySelector(".card-open").click();
+  await until(() => !$("detail-view").hidden, "recording editor opens");
+  assert.equal($("summary").value, "녹음별 요약 내용");
+  $("tab-transcript").click(); $("transcript").value = "이 녹음만 수정합니다.";
+  $("transcript").dispatchEvent(new w.Event("input", {bubbles:true}));
+  await until(async () => (await readState()).files[0].transcript === "이 녹음만 수정합니다.", "scoped recording autosave");
+  assert.equal((await readState()).transcript, "");
+
+  const secondUpload = new FormData();
+  secondUpload.append("files", new Blob([wav], {type:"audio/wav"}), "다른회의.wav");
+  const secondFile = (await (await fetch(base + "/api/files", {method:"POST", headers:{Cookie:authCookie,"X-Scribe-Request":"1"}, body:secondUpload})).json()).files[0];
+  const setText = body => fetch(base + "/api/text", {method:"PATCH", headers:{Cookie:authCookie,"X-Scribe-Request":"1","Content-Type":"application/json"}, body:JSON.stringify(body)});
+  await setText({file_id:secondFile.id, transcript:"다른 녹음 원문", summary:"녹음별 요약 내용"});
+  await setText({summary:"녹음별 요약 내용"});
+  w.dispatchEvent(new w.Event("hashchange"));
+  await until(() => $("file-list").querySelectorAll(".history-card").length === 2, "second recording loaded");
+  $("tab-summary").click(); $("summary-replace").click();
+  assert.equal($("replace-dialog").open, true);
+  assert.ok($("replace-scope").textContent.includes("회의자료"));
+  d.querySelector(".replace-find").value = "요약";
+  d.querySelector(".replace-to").value = "수정된 요약";
+  $("replace-form").dispatchEvent(new w.Event("submit", {bubbles:true,cancelable:true}));
+  await until(() => !$("replace-dialog").open && $("toast").querySelector(".toast-action"), "summary correction and undo ready");
+  let corrected = await readState();
+  assert.equal(corrected.files.find(f => f.id === fileId).summary, "녹음별 수정된 요약 내용");
+  assert.equal(corrected.files.find(f => f.id === fileId).transcript, "이 녹음만 수정합니다.");
+  assert.equal(corrected.files.find(f => f.id === secondFile.id).summary, "녹음별 요약 내용");
+  assert.equal(corrected.summary, "녹음별 요약 내용");
+  // Undo after changing records must still address only the original summary.
+  $("back-to-history").click();
+  await until(() => !$("history-view").hidden, "history before switching summaries");
+  const secondCard = $("file-list").querySelector(`[data-id="${secondFile.id}"]`);
+  secondCard.querySelector('[data-tab="summary"]').click(); secondCard.querySelector(".card-open").click();
+  await until(() => $("detail-title").textContent.includes("다른회의"), "different summary opened");
+  $("summary").value = "다른 요약의 새 편집"; $("summary").dispatchEvent(new w.Event("input", {bubbles:true}));
+  await until(async () => (await readState()).files.find(f => f.id === secondFile.id).summary === "다른 요약의 새 편집", "other summary edit saved");
+  $("toast").querySelector(".toast-action").click();
+  await until(async () => (await readState()).files.find(f => f.id === fileId).summary === "녹음별 요약 내용", "scoped undo");
+  corrected = await readState();
+  assert.equal(corrected.files.find(f => f.id === secondFile.id).summary, "다른 요약의 새 편집");
+  assert.equal(corrected.summary, "녹음별 요약 내용");
+  assert.equal(corrected.files.find(f => f.id === fileId).transcript, "이 녹음만 수정합니다.");
+  process.stdout.write("PASS: summary-only correction, explicit record scope, sidebar removal and scoped undo\n");
+  $("nav-notes").click();
+  await until(() => $("detail-title").textContent === "전체 메모" && $("transcript").value === "", "global memo stays separate");
+  process.stdout.write("PASS: searchable history cards, scoped editing, preview/copy, player persistence and reprocessing choices\n");
 
   $("transcript").value = "이번 주 금요일 오후 두 시에 제품 시연을 진행합니다.";
   $("transcript").dispatchEvent(new w.Event("input", {bubbles: true}));
@@ -73,13 +213,25 @@ async function main() {
   process.stdout.write("PASS: preferences and custom prompt editor event handling\n");
 
   $("save-transcript").click(); assert.equal($("save-dialog").open, true);
-  $("save-format").value = "md";
+  $("save-format").value = "md"; $("save-plain").checked = true;
   $("save-form").dispatchEvent(new w.Event("submit", {bubbles: true, cancelable: true}));
   await until(() => downloads.length === 1, "export click");
-  assert.equal(await (await fetch(downloads[0])).text(), $("transcript").value);
+  assert.equal(await (await fetch(downloads[0], {headers: {Cookie: authCookie}})).text(), $("transcript").value);
   assert.ok(downloads[0].endsWith(".md"));
   $("help-button").click(); assert.ok($("info-content").textContent.includes("localhost")); $("info-dialog").close();
   $("licenses-button").click(); assert.ok($("info-content").textContent.includes("faster-whisper")); $("info-dialog").close();
+  $("vault-lock").click();
+  await until(() => !$("vault-gate").hidden, "vault manual lock");
+  assert.equal(d.querySelectorAll('input[type="password"]').length, 0);
+  assert.equal($("vault-touchid").disabled, false);
+  assert.equal($("transcript").value, "");
+  assert.equal($("prompt-editor").value, "");
+  assert.equal($("file-list").children.length, 0);
+  assert.equal($("history-search").value, "");
+  assert.equal((await fetch(base + "/api/state", {headers:{Cookie:authCookie}})).status, 423);
+  $("vault-touchid").click();
+  await until(() => $("vault-gate").hidden && $("transcript").value.includes("제품 시연"), "unlock restores encrypted text");
+  process.stdout.write("PASS: manual lock clears private UI and native reauthentication restores encrypted text\n");
   assert.deepEqual(errors.map(e => e.message), []);
   process.stdout.write("PASS: Markdown save/download, help, notices and no JavaScript runtime errors\n");
 }

@@ -4,15 +4,30 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="내 컴퓨터에서 녹음하고, 받아쓰고, 요약하는 로컬 AI 기록 도우미">
-  <meta name="theme-color" content="#e9eff6">
+  <meta name="theme-color" content="#2a2a2a">
   <title>Local LLM Encoder</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/vault.css">
+  <script src="/static/vault.js" defer></script>
   <script src="/static/app.js" defer></script>
-  <link rel="stylesheet" href="/static/panel.css">
+  <link rel="stylesheet" href="/static/history.css">
+  <script src="/static/history.js" defer></script>
   <script src="/static/panel.js" defer></script>
 </head>
-<body>
+<body class="vault-locked history-app">
+<section id="vault-gate" class="vault-gate" aria-label="암호화 보관함">
+  <div class="vault-card">
+    <span class="vault-symbol" aria-hidden="true"><svg class="icon"><use href="#i-lock"/></svg></span>
+    <h1 id="vault-title">암호화 보관함</h1>
+    <p id="vault-note">보관함 상태를 확인하고 있습니다.</p>
+    <p id="vault-error" class="vault-error" role="alert"></p>
+    <button id="vault-touchid" class="button primary" type="button" hidden>Touch ID로 열기</button>
+    <button id="vault-mac-password" class="button" type="button" hidden>Mac 로그인 암호로 열기</button>
+    <a id="vault-open-app" class="button primary" href="localllmencoder://open" hidden>Mac 앱에서 인증하기</a>
+    <p class="vault-auth-note" id="vault-auth-note">Mac 로그인 암호는 macOS 인증 창에서만 입력합니다.</p>
+  </div>
+</section>
 <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
   <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></symbol>
   <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4M12 14v3"/></symbol>
@@ -25,60 +40,69 @@
   <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
   <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14z"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M19 8a8 8 0 1 0 1 7M19 3v6h-6"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
 </svg>
-<header class="app-header">
-  <div class="brand"><div class="brand-icon"><svg class="icon"><use href="#i-mic"/></svg></div><div><h1>Local LLM Encoder</h1><p>LOCAL AI · VOICE TO NOTES</p></div></div>
-  <span class="local-badge"><svg class="icon"><use href="#i-lock"/></svg>내 컴퓨터에서만 처리</span>
-</header>
-<nav class="menu-bar" aria-label="프로그램 메뉴">
-  <div class="menus">
-    <details class="menu"><summary>File</summary><div class="menu-items"><button data-action="save-transcript">Save STT text…</button><button data-action="save-summary">Save summary…</button><hr><button data-action="results">Results 폴더</button><button data-action="recordings">Recordings 폴더</button></div></details>
-    <details class="menu"><summary>Settings</summary><div class="menu-items"><button data-action="settings">Preferences…</button><button data-action="prompts">요약 서식 편집…</button><button data-action="replace">일괄 수정…</button></div></details>
-    <button class="menu-button" id="licenses-button">Third-Party Licenses</button>
-  </div>
-  <button class="help-button" id="help-button">사용 방법 <span>?</span></button>
-</nav>
-<section id="panel-options" aria-label="설정" hidden>
-  <button id="panel-preferences">모델 및 음성 인식 설정</button>
-  <button id="panel-prompts">요약 서식 편집</button>
-  <button id="panel-replace">일괄 수정 규칙</button>
-  <button id="panel-results">저장한 결과 보기</button>
-</section>
-<main class="workspace" id="workspace">
-  <div class="left-column">
-    <section class="panel record-panel" aria-labelledby="record-title">
-      <h2 id="record-title">STEP 1 : Record <span>음성 녹음</span></h2>
-      <div class="record-controls"><div class="record-indicator"><span class="status-dot" id="record-dot"></span><div><strong id="record-status">Ready</strong><span class="record-subtitle" id="record-hint">마이크로 대화를 녹음하세요.</span></div><span id="record-time" class="record-time" hidden>00:00</span><canvas id="waveform" width="132" height="32" hidden aria-hidden="true"></canvas></div>
-        <button id="record-button" class="button record-button"><svg class="icon"><use href="#i-mic"/></svg><span>Start record</span></button>
-      </div>
-    </section>
-    <section class="panel files-panel" id="drop-zone" aria-labelledby="files-title">
-      <div class="panel-title"><h2 id="files-title">STEP 2 : Record Files <span>녹음 파일</span></h2><span class="count-label" id="file-count">0 files</span></div>
-      <div class="file-actions"><button id="stt-button" class="button primary"><svg class="icon"><use href="#i-spark"/></svg><span>STT</span></button><button id="add-button" class="button"><svg class="icon"><use href="#i-upload"/></svg>Add</button><button id="delete-button" class="button"><svg class="icon"><use href="#i-trash"/></svg>Delete</button></div>
+<main class="workspace app-shell" id="workspace">
+  <aside class="app-sidebar" aria-label="앱 탐색">
+    <nav class="sidebar-nav" aria-label="화면">
+      <button class="nav-item active" id="nav-history" aria-current="page"><span class="nav-symbol purple"><svg class="icon"><use href="#i-history"/></svg></span><span>기록</span><span class="nav-count" id="history-count">0</span></button>
+      <button class="nav-item" id="nav-notes"><span class="nav-symbol blue"><svg class="icon"><use href="#i-edit"/></svg></span><span>전체 메모</span></button>
+      <button class="nav-item" data-action="prompts"><span class="nav-symbol blue"><svg class="icon"><use href="#i-spark"/></svg></span><span>요약 서식</span></button>
+    </nav>
+    <nav class="sidebar-nav" aria-label="설정과 저장">
+      <button class="nav-item" data-action="settings"><span class="nav-symbol gray"><svg class="icon"><use href="#i-settings"/></svg></span><span>모델 및 설정</span></button>
+      <button class="nav-item" data-action="results"><span class="nav-symbol gray"><svg class="icon"><use href="#i-save"/></svg></span><span>저장한 결과</span></button>
+    </nav>
+    <div class="sidebar-bottom">
+      <button id="vault-lock" class="sidebar-lock" type="button" hidden><svg class="icon"><use href="#i-lock"/></svg>보관함 잠그기</button>
+      <div class="sidebar-links"><button id="help-button">사용 방법</button><button id="licenses-button">오픈소스</button></div>
+      <div class="local-footer">Local LLM Encoder<span class="local-tag">LOCAL</span></div>
+    </div>
+  </aside>
+  <div class="app-content" id="drop-zone">
+    <section id="history-view" class="history-view" aria-labelledby="files-title">
+      <header class="history-header"><div class="page-title"><h1 id="files-title">기록</h1><button id="add-button" class="button"><svg class="icon"><use href="#i-upload"/></svg>파일 추가</button></div>
+        <label class="history-search"><svg class="icon"><use href="#i-search"/></svg><input id="history-search" type="search" placeholder="기록에서 검색" aria-label="기록 검색" autocomplete="off"><kbd>⌘ F</kbd></label>
+      </header>
+      <section class="record-panel" aria-label="새 녹음">
+        <div class="record-indicator"><span class="status-dot" id="record-dot"></span><div><strong id="record-status">녹음 준비</strong><span class="record-subtitle" id="record-hint">말로 남기고, 글로 정리하세요.</span></div><span id="record-time" class="record-time" hidden>00:00</span><canvas id="waveform" width="132" height="32" hidden aria-hidden="true"></canvas></div>
+        <button id="record-button" class="button record-button"><svg class="icon"><use href="#i-mic"/></svg><span>녹음 시작</span></button>
+      </section>
+      <div class="history-toolbar"><label class="select-all"><input type="checkbox" id="select-all" aria-label="표시된 기록 모두 선택"><span>모두 선택</span></label><span class="count-label" id="file-count">0개</span><span class="toolbar-spacer"></span><button id="stt-button" class="button"><svg class="icon"><use href="#i-spark"/></svg><span>받아쓰기</span></button><button id="delete-button" class="icon-button" aria-label="선택한 기록을 목록에서 제거" title="목록에서 제거 · 보관함의 녹음 파일은 유지됩니다"><svg class="icon"><use href="#i-trash"/></svg></button></div>
       <input type="file" id="audio-input" accept=".wav,.mp3,.m4a,.flac,.ogg,.aac,.webm,.mp4,.aiff,.aif" multiple hidden>
-      <div class="file-table-wrap"><table class="file-table"><thead><tr><th class="select-cell"><input type="checkbox" id="select-all" aria-label="모든 파일 선택"></th><th id="th-name">file name</th><th class="duration-cell" id="th-duration">duration</th><th class="status-cell" id="th-status">status</th></tr></thead><tbody id="file-list"></tbody></table><button class="empty-files" id="empty-files"><svg class="icon"><use href="#i-file"/></svg><strong>아직 녹음 파일이 없습니다</strong><span>파일을 끌어 놓거나 Add를 눌러 추가하세요.</span><small>WAV · MP3 · M4A · FLAC · OGG · AAC · WEBM · MP4 · AIFF</small></button></div>
-      <div class="drop-overlay">음성 파일을 놓아 추가하세요</div>
+      <div id="file-list" class="history-list" aria-label="녹음 기록"></div>
+      <button class="empty-files" id="empty-files"><span class="empty-mark"><svg class="icon"><use href="#i-mic"/></svg></span><strong>첫 번째 기록을 남겨 보세요</strong><span>녹음을 시작하거나 오디오 파일을 추가하세요.</span><small>WAV · MP3 · M4A · FLAC · OGG · AAC</small></button>
+      <div id="no-search-results" class="search-empty" hidden><svg class="icon"><use href="#i-search"/></svg><strong>검색 결과가 없습니다</strong><span>다른 제목이나 본문으로 검색해 보세요.</span></div>
     </section>
-    <section class="panel transcript-panel" aria-labelledby="transcript-title">
-      <div class="panel-title"><h2 id="transcript-title">STEP 3 : STT result <span>받아쓰기</span></h2><span class="editable-label">직접 수정 가능</span></div>
-      <label class="sr-only" for="transcript">받아쓰기 결과</label><textarea id="transcript" spellcheck="false" placeholder="음성 인식 결과가 여기에 표시됩니다.&#10;직접 텍스트를 입력하거나, 오인식된 내용을 수정할 수 있습니다."></textarea>
-      <div class="panel-footer"><span class="text-count" id="transcript-count">0자</span><div class="footer-buttons"><button class="button" data-open-replace>일괄 수정</button><button class="button" id="clear-button">Clear</button><button class="button" id="save-transcript"><svg class="icon"><use href="#i-save"/></svg>Save…</button></div></div>
+    <section id="detail-view" class="detail-view" hidden aria-labelledby="detail-title">
+      <header class="detail-header"><button id="back-to-history" class="back-button"><svg class="icon"><use href="#i-back"/></svg>기록</button><div><p class="eyebrow" id="detail-eyebrow">WORKSPACE</p><h1 id="detail-title">전체 메모</h1><p id="detail-description">모아 둔 받아쓰기와 직접 작성한 메모를 편집합니다.</p></div></header>
+      <div class="editor-tabs" role="tablist" aria-label="기록 내용"><button id="tab-transcript" role="tab" aria-selected="true" aria-controls="transcript-panel">받아쓰기</button><button id="tab-summary" role="tab" aria-selected="false" aria-controls="summary-panel">요약</button><span id="editor-save-status" role="status">보관함에 자동 저장</span></div>
+      <section class="panel transcript-panel" id="transcript-panel" role="tabpanel" aria-labelledby="tab-transcript">
+        <div class="panel-title"><h2 id="transcript-title">받아쓰기</h2><span class="editable-label">직접 수정 가능</span></div>
+        <label class="sr-only" for="transcript">받아쓰기 결과</label><textarea id="transcript" spellcheck="false" placeholder="받아쓰기를 확인하고 직접 수정하세요. 다른 곳의 텍스트를 붙여 넣어 요약할 수도 있습니다."></textarea>
+        <div class="panel-footer"><span class="text-count" id="transcript-count">0자</span><div class="footer-buttons"><button class="button" id="clear-button">비우기</button><button class="button" id="save-transcript"><svg class="icon"><use href="#i-save"/></svg>저장…</button></div></div>
+      </section>
+      <section class="panel summary-panel" id="summary-panel" role="tabpanel" hidden aria-labelledby="tab-summary">
+        <div class="summary-controls"><label for="prompt-select">서식</label><select id="prompt-select" aria-label="요약 서식"><option>일반 요약</option></select><button class="button primary" id="summary-button"><svg class="icon"><use href="#i-spark"/></svg><span>요약 생성</span></button><button class="button copy-button" id="copy-button" title="요약 결과 복사"><svg class="icon"><use href="#i-copy"/></svg><span>복사</span></button></div>
+        <h2 id="summary-title" class="sr-only">요약</h2><div class="model-label" id="model-label">로컬 요약 모델을 확인하고 있습니다.</div>
+        <label class="sr-only" for="summary">요약 결과</label><textarea id="summary" spellcheck="false" placeholder="서식을 고르고 요약을 생성하세요. 생성한 내용은 직접 편집할 수 있습니다."></textarea>
+        <div class="panel-footer"><span class="text-count" id="summary-count">0자</span><div class="footer-buttons"><button class="button" id="summary-replace" data-open-replace>일괄 수정</button><button class="button" id="save-summary"><svg class="icon"><use href="#i-save"/></svg>저장…</button></div></div>
+      </section>
     </section>
+    <div class="drop-overlay">오디오 파일을 놓아 추가하세요</div>
   </div>
-  <section class="panel summary-panel" aria-labelledby="summary-title">
-    <h2 id="summary-title">STEP 4 : Local LLM Summary <span>로컬 AI 요약</span></h2>
-    <div class="summary-controls"><label for="prompt-select">Prompt:</label><select id="prompt-select" aria-label="요약 서식"><option>일반 요약</option></select><button class="button primary" id="summary-button"><svg class="icon"><use href="#i-spark"/></svg><span>Summary</span></button><button class="button copy-button" id="copy-button" title="요약 결과 복사"><svg class="icon"><use href="#i-copy"/></svg><span>Copy to Clipboard</span></button></div>
-    <div class="model-label" id="model-label">Model: qwen3:4b-instruct · Device: Auto</div>
-    <label class="sr-only" for="summary">요약 결과</label><textarea id="summary" spellcheck="false" placeholder="요약 결과가 실시간으로 표시됩니다.&#10;&#10;받아쓰기 내용을 확인한 뒤, 원하는 서식을 고르고 Summary를 눌러 주세요."></textarea><div id="summary-view" class="summary-view" tabindex="0" aria-label="요약 결과" hidden></div>
-    <div class="panel-footer"><span class="text-count" id="summary-count">0자</span><div class="footer-buttons"><button class="button" id="summary-edit" hidden>편집</button><button class="button" data-open-replace>일괄 수정</button><button class="button" id="save-summary"><svg class="icon"><use href="#i-save"/></svg>Save…</button></div></div>
-  </section>
 </main>
 <footer class="status-bar"><div class="status-main" role="status" aria-live="polite"><span class="status-dot" id="app-dot"></span><span id="app-status">로컬 프로그램에 연결 중…</span></div><progress id="job-progress" hidden></progress><span class="localhost-label"><svg class="icon"><use href="#i-lock"/></svg>localhost</span></footer>
 <div id="toast" class="toast" role="status" hidden></div>
 
 <dialog id="settings-dialog" class="settings-dialog"><form id="settings-form">
-  <div class="dialog-heading"><div><h2 id="settings-title">Preferences</h2><p>로컬 모델과 음성 인식 설정</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div>
+  <div class="dialog-heading"><div><h2>모델 및 설정</h2><p>로컬 모델과 음성 인식 설정</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div>
   <div class="dialog-body">
     <section class="system-status"><div class="section-label">시스템 상태 <button type="button" id="refresh-status">새로고침 ↻</button></div><div id="system-status-list"></div><div class="setup-progress" id="setup-progress" hidden></div></section>
     <fieldset><legend>요약 모델 <small>Ollama</small></legend><div class="form-grid"><label class="wide">모델<select name="llm_model" id="llm-model"></select></label><label>실행 장치<select name="llm_device"><option value="auto">자동 (권장)</option><option value="cpu">CPU만</option><option value="gpu">GPU 우선</option></select></label><label>컨텍스트 길이 <small>(부족하면 자동으로 늘림)</small><input type="number" name="context_length" min="2048" max="65536" step="1024" required></label><label>최대 출력 토큰 <small>(긴 회의는 자동으로 늘림)</small><input type="number" name="max_tokens" min="256" max="16384" step="256" required></label><label>온도<input type="number" name="temperature" min="0" max="1" step="0.1" required></label></div><label class="checkbox-label"><input type="checkbox" id="qwen-only" checked> Qwen 모델만 표시</label></fieldset>
@@ -91,11 +115,15 @@
 
 <dialog id="prompts-dialog"><form id="prompts-form"><div class="dialog-heading"><div><h2>요약 서식 편집</h2><p>원하는 항목에 맞춰 요약 지시문을 작성하세요.</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><label class="form-label">서식<select id="edit-prompt-select"></select></label><label class="form-label">지시문<textarea id="prompt-editor" rows="10" required></textarea></label><p class="field-note">모든 서식에 원문에 있는 정보만 사용하고 추측·진단을 추가하지 않는 공통 규칙이 적용됩니다.</p><div class="new-prompt"><input id="new-prompt-name" aria-label="새 서식 이름" placeholder="새 서식 이름" maxlength="60"><button type="button" class="button" id="add-prompt">추가</button><button type="button" class="button" id="remove-prompt">선택 서식 삭제</button></div></div><div class="dialog-footer"><button type="button" class="button" data-close>취소</button><button type="submit" class="button primary">서식 저장</button></div></form></dialog>
 
-<dialog id="save-dialog" class="small-dialog"><form id="save-form"><div class="dialog-heading"><h2 id="save-title">결과 저장</h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><label class="form-label">파일 형식<select id="save-format"><option value="txt">텍스트 (.txt)</option><option value="md">Markdown (.md)</option></select></label><p class="field-note" id="save-note">Results 폴더에 저장하고 파일을 다운로드합니다.</p></div><div class="dialog-footer"><button type="button" class="button" data-close>취소</button><button type="submit" class="button primary">저장</button></div></form></dialog>
+<dialog id="save-dialog" class="small-dialog"><form id="save-form"><div class="dialog-heading"><h2 id="save-title">결과 저장</h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><label class="form-label">파일 형식<select id="save-format"><option value="txt">텍스트 (.txt)</option><option value="md">Markdown (.md)</option></select></label><label class="checkbox-label"><input id="save-plain" type="checkbox">일반 파일도 내보내기 (암호화 해제본)</label><p class="field-note">Results 폴더에는 암호화해 보관합니다. 일반 파일은 선택한 경우에만 내보냅니다.</p></div><div class="dialog-footer"><button type="button" class="button" data-close>취소</button><button type="submit" class="button primary">저장</button></div></form></dialog>
 
 <dialog id="storage-dialog"><div class="dialog-heading"><div><h2 id="storage-title">Results</h2><p>이 컴퓨터에 저장된 파일</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body storage-list" id="storage-list"></div><div class="dialog-footer"><button class="button" data-close>닫기</button></div></dialog>
 
-<dialog id="replace-dialog"><form id="replace-form"><div class="dialog-heading"><div><h2>일괄 수정</h2><p>잘못 인식된 말을 받아쓰기와 요약에서 한 번에 바꿉니다.</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body"><div class="replace-head"><span>찾을 말</span><span></span><span>바꿀 말</span><span></span></div><div id="replace-rules" class="replace-rules"></div><button type="button" class="button" id="add-replace-rule">+ 규칙 추가</button><p class="field-note">띄어쓰기가 달라도 찾습니다. 예: ‘슬라시크레이트’ 규칙은 ‘슬라시 크레이트’도 바꿉니다.<br>저장한 규칙은 앞으로 만드는 받아쓰기와 요약에도 자동으로 적용됩니다.</p><div id="replace-error" class="inline-error" role="alert" hidden></div></div><div class="dialog-footer"><button type="button" class="button" data-close>닫기</button><button type="button" class="button" id="save-replace">규칙만 저장</button><button type="submit" class="button primary">저장하고 지금 바꾸기</button></div></form></dialog>
+<dialog id="replace-dialog"><form id="replace-form">
+  <div class="dialog-heading"><div><h2>이 요약 일괄 수정</h2><p id="replace-scope">현재 열어 둔 요약 본문에서만 수정합니다.</p></div><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div>
+  <div class="dialog-body"><div class="replace-head"><span>찾을 말</span><span></span><span>바꿀 말</span><span></span></div><div id="replace-rules" class="replace-rules"></div><button type="button" class="button" id="add-replace-rule">+ 규칙 추가</button><p class="field-note">띄어쓰기가 달라도 찾습니다. 예: ‘슬라시크레이트’ 규칙은 ‘슬라시 크레이트’도 바꿉니다.<br>저장한 규칙은 다음에 이 창을 열 때 불러옵니다.</p><div id="replace-error" class="inline-error" role="alert" hidden></div></div>
+  <div class="dialog-footer"><button type="button" class="button" data-close>닫기</button><button type="button" class="button" id="save-replace">규칙만 저장</button><button type="submit" class="button primary">이 요약에 적용</button></div>
+</form></dialog>
 <dialog id="info-dialog"><div class="dialog-heading"><h2 id="info-title"></h2><button type="button" class="icon-button" data-close aria-label="닫기"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="dialog-body info-content" id="info-content"></div><div class="dialog-footer"><button class="button" data-close>닫기</button></div></dialog>
 <dialog id="confirm-dialog" class="small-dialog"><div class="dialog-heading"><h2>컨텍스트 길이 조정</h2></div><div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button class="button" id="confirm-no">취소</button><button class="button primary" id="confirm-yes">늘려서 실행</button></div></dialog>
 </body>

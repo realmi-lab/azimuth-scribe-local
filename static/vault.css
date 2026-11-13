@@ -1,0 +1,17 @@
+body.vault-locked .workspace,
+body.vault-locked .menu-bar,
+body.vault-locked #panel-options,
+body.vault-locked .status-bar { visibility: hidden !important; }
+.vault-gate { position: fixed; inset: 0; z-index: 500; display: grid; place-items: center; padding: 24px; background: Canvas; color: CanvasText; overflow: auto; }
+.vault-gate[hidden] { display: none; }
+.vault-card { width: min(440px, 100%); display: grid; gap: 14px; margin: auto; }
+.vault-card h1 { margin: 0; font-size: 22px; }
+.vault-card p { margin: 0; line-height: 1.6; font-size: 13px; }
+.vault-symbol { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; background: var(--field); color: var(--secondary); margin-bottom: 4px; }
+.vault-symbol .icon { width: 25px; height: 25px; }
+.vault-card .vault-auth-note { font-size: 11px; opacity: .75; }
+.vault-card [hidden] { display: none !important; }
+.vault-card button, .vault-card a { min-height: 38px; justify-content: center; text-decoration: none; }
+.vault-error { color: #d34337; white-space: pre-wrap; }
+#vault-lock { position: fixed; z-index: 80; right: 14px; bottom: 12px; }
+body[data-panel] #vault-lock { bottom: 34px; }

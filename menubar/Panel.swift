@@ -17,6 +17,7 @@ final class PanelModel: ObservableObject {
     @Published var busy = false
     @Published var recording = false
     @Published var pending = false
+    @Published var vaultLocked = true
     @Published var seconds = 0
     @Published var level = 0.0
     @Published var job = ""
@@ -29,20 +30,21 @@ final class PanelModel: ObservableObject {
     var openFolder: (String) -> Void = { _ in }
     var quit: () -> Void = {}
     var help: () -> Void = {}
+    var lockVault: () -> Void = {}
 }
 
 /// Single large panel: native recorder bar on top, embedded web workspace below.
 struct RecorderPanel: View {
-    static let size = NSSize(width: 880, height: 700)
+    static let size = NSSize(width: 1000, height: 760)
     @ObservedObject var model: PanelModel
     let workspace: Workspace
     private var locked: Bool { model.busy || model.working || model.recording || !model.connected }
 
     private var statusText: String {
-        model.recording ? "녹음 중" : model.working ? "작업 중" : model.connected ? "준비됨" : "서버 중지됨"
+        model.recording ? "녹음 중" : model.working ? "작업 중" : model.connected ? (model.vaultLocked ? "보관함 잠김" : "준비됨") : "서버 중지됨"
     }
     private var statusColor: Color {
-        model.recording ? .red : model.working ? .orange : model.connected ? .green : .secondary
+        model.recording ? .red : model.working ? .blue : .secondary
     }
 
     var body: some View {
@@ -58,7 +60,6 @@ struct RecorderPanel: View {
             }
             if model.connected {
                 WorkspacePane(workspace: workspace, page: model.screen == .settings ? "settings" : "workspace")
-                    .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 10)
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "power.circle").font(.system(size: 40)).foregroundStyle(.secondary)
@@ -69,7 +70,7 @@ struct RecorderPanel: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .background(Color(nsColor: .textBackgroundColor).ignoresSafeArea()) // clean solid white / dark
-        .frame(minWidth: 720, idealWidth: Self.size.width, maxWidth: .infinity,
+        .frame(minWidth: 780, idealWidth: Self.size.width, maxWidth: .infinity,
                minHeight: 520, idealHeight: Self.size.height, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("scribe-panel")
     }
@@ -97,15 +98,17 @@ struct RecorderPanel: View {
             .tint(model.recording ? .red : .accentColor)
             .keyboardShortcut("r", modifiers: .command)
             .help(model.recording ? "녹음을 끝내고 받아쓰기 (⌘R)" : "녹음 시작 (⌘R)")
-            .disabled(!model.recording && (model.busy || model.working))
+            .disabled(!model.recording && (model.busy || model.working || (model.connected && model.vaultLocked)))
             HStack(spacing: 5) {
                 Circle().fill(statusColor).frame(width: 6, height: 6)
                 Text(statusText).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Menu {
+                Button("보관함 잠그기", action: model.lockVault).disabled(model.vaultLocked || !model.connected)
+                Divider()
                 Button("설정…") { model.screen = .settings }.disabled(!model.connected)
                     .keyboardShortcut(",", modifiers: .command)
-                Button("사용 방법") { model.help() }.disabled(!model.connected)
+                Button("사용 방법") { model.help() }.disabled(!model.connected || model.vaultLocked)
                 Divider()
                 Button("녹음 폴더 열기") { model.openFolder("data/Recordings") }
                 Button("저장 결과 폴더 열기") { model.openFolder("data/Results") }
