@@ -166,9 +166,18 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
             (root / "pending-recording.m4a").write_bytes(b"excluded-recording-temp")
             (root / "workspace.json").write_text(json.dumps({"files": [{"id": "legacy", "name": "legacy.wav", "stored_name": "legacy.wav", "selected": True,
                 "duration": 1, "status": "Completed", "transcript": SECRET, "error": None}], "transcript": SECRET, "summary": ""}))
+            # An install that never chose a speech model moves from the old default to the new one.
+            (root / "settings.json").write_text(json.dumps({"whisper_model": "small", "temperature": 0.3}))
             previous = os.environ.get("SCRIBE_DATA_DIR")
             os.environ["SCRIBE_DATA_DIR"] = directory
             import server as s
+            self.assertEqual((s.CONFIG.whisper_model, s.CONFIG.temperature), ("large-v3-turbo", 0.3))
+            self.assertEqual(json.loads((root / "settings.json").read_text())["settings_version"], 2)
+            self.assertEqual(s.load_settings().whisper_model, "large-v3-turbo")
+            # Saved formats from before: the retired defaults go, a rewritten one and the user's own stay.
+            self.assertEqual(list(s.DEFAULT_PROMPTS), ["일반 요약", "회의록"])
+            (root / "prompts.json").write_text(json.dumps({**s.DEFAULT_PROMPTS, **s.RETIRED_PROMPTS,
+                                                           "법률 상담": "내가 고쳐 쓴 서식", "내 서식": "결정 사항만 정리하세요."}))
             if previous is None:
                 os.environ.pop("SCRIBE_DATA_DIR")
             else:
@@ -203,6 +212,15 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await anonymous.get("/api/download/recordings/legacy.wav")).status_code, 401)
                     state = (await client.get("/api/state")).json()
                     self.assertEqual(state["transcript"], SECRET)
+                    self.assertEqual(list(state["prompts"]), ["일반 요약", "회의록", "법률 상담", "내 서식"])
+                    self.assertEqual(state["prompts"]["법률 상담"], "내가 고쳐 쓴 서식")
+                    # Older recordings get a date for the calendar from their stored audio file.
+                    self.assertAlmostEqual(state["files"][0]["created"], (root / "Recordings/legacy.wav.enc").stat().st_mtime, delta=1)
+                    self.assertEqual((await client.put("/api/view", json={"view": "calendar"})).status_code, 200)
+                    self.assertEqual((await client.put("/api/view", json={"view": "grid"})).status_code, 422)
+                    self.assertEqual((await client.get("/api/state")).json()["view"], "calendar")
+                    saved_files = (await client.get("/api/storage/results")).json()["files"]
+                    self.assertAlmostEqual(saved_files[0]["modified"], (root / "Results/legacy.txt.enc").stat().st_mtime, delta=1)
                     self.assertEqual((await client.get("/api/download/recordings/legacy.wav")).content, audio)
                     ranged = await client.get("/api/download/recordings/legacy.wav", headers={"Range": "bytes=0-1"})
                     self.assertEqual(ranged.status_code, 206)
@@ -248,8 +266,112 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                         scoped = (await client.get("/api/state")).json()
                         self.assertEqual(scoped["files"][0]["transcript"], "범위 확인 결과")
                         self.assertEqual(scoped["files"][1]["status"], "Pending")
+                        # "요약하기" is one request: a recording without a transcript is transcribed first.
+                        summarised = []
+                        def fake_summary(target, template, raw_qwen, say, progress):
+                            say("요약하는 중…")
+                            summarised.append(target["transcript"])
+                            target["summary"] = "한 번에 만든 요약"
+                            return 1, "stop"
+                        original_summary, original_check = s.run_summary, s.summary_model
+                        s.run_summary, s.summary_model = fake_summary, lambda: False
+                        async def finished():
+                            for _ in range(100):
+                                if not s.busy():
+                                    break
+                                await asyncio.sleep(0.02)
+                            return (await client.get("/api/state")).json()
+                        try:
+                            new_id = scoped["files"][1]["id"]
+                            self.assertEqual((await client.post("/api/summary", json={"prompt": "없는 서식", "file_id": new_id})).status_code, 400)
+                            self.assertEqual((await client.post("/api/summary", json={"prompt": "회의록", "ids": []})).status_code, 400)
+                            self.assertEqual((await client.post("/api/summary", json={"prompt": "회의록", "file_id": new_id})).status_code, 200)
+                            piped = await finished()
+                            self.assertEqual(piped["runtime"]["job"]["status"], "completed", piped["runtime"]["job"])
+                            self.assertEqual(piped["runtime"]["job"]["target"], new_id)
+                            self.assertEqual(piped["files"][1]["transcript"], "범위 확인 결과")
+                            self.assertEqual(piped["files"][1]["summary"], "한 번에 만든 요약")
+                            self.assertEqual(piped["files"][1]["status"], "Completed")
+                            self.assertEqual(piped["last_prompt"], "회의록")
+                            # An existing (possibly corrected) transcript is summarised as it is.
+                            await client.patch("/api/text", json={"file_id": "legacy", "transcript": "직접 고친 원문"})
+                            self.assertEqual((await client.post("/api/summary", json={"prompt": "일반 요약", "ids": ["legacy", new_id]})).status_code, 200)
+                            piped = await finished()
+                            self.assertEqual(summarised, ["범위 확인 결과", "직접 고친 원문", "범위 확인 결과"])
+                            self.assertEqual(piped["files"][0]["transcript"], "직접 고친 원문")
+                            self.assertEqual(piped["runtime"]["job"]["message"], "요약 완료 · 2개")
+                        finally:
+                            s.run_summary, s.summary_model = original_summary, original_check
                     finally:
                         s.model_installed, s.ensure_whisper = original_installed, original_whisper
+                    # Renaming keeps the stored audio playable under its real type.
+                    self.assertEqual((await client.patch("/api/text", json={"file_id": "legacy", "name": "  "})).status_code, 400)
+                    self.assertEqual((await client.patch("/api/text", json={"file_id": "legacy", "name": "주간/회의\n메모"})).status_code, 200)
+                    self.assertEqual((await client.get("/api/state")).json()["files"][0]["name"], "주간 회의 메모")
+                    renamed = await client.get("/api/download/recordings/legacy.wav")
+                    self.assertEqual(renamed.headers["content-type"], "audio/x-wav")
+                    self.assertTrue(renamed.headers["content-disposition"].endswith(".wav"))
+                    # Deleting: the written result and the recording file are chosen separately.
+                    async def upload(name):
+                        with io.BytesIO(audio) as source:
+                            return (await client.post("/api/files", files={"files": (name, source, "audio/wav")})).json()["files"][0]
+                    async def files():
+                        return (await client.get("/api/state")).json()["files"]
+                    remove = lambda **body: client.post("/api/files/delete", json=body)
+                    one = await upload("지울 기록.wav")
+                    stored = s.VAULT.encrypted(root / "Recordings" / one["stored_name"])
+                    await client.patch("/api/text", json={"file_id": one["id"], "transcript": "받아쓴 글", "summary": "요약한 글"})
+                    self.assertEqual((await remove(id=one["id"])).status_code, 400)
+                    self.assertEqual((await remove(id="missing", audio=True)).status_code, 404)
+                    text_only = (await remove(id=one["id"], summary=True)).json()
+                    self.assertFalse(text_only["removed"])
+                    kept = (await files())[2]
+                    self.assertEqual((kept["transcript"], kept["summary"], kept["stored_name"], kept["status"]), ("", "", one["stored_name"], "Pending"))
+                    self.assertNotIn("trash", (await client.get("/api/state")).json())   # undo copies stay on the server
+                    self.assertEqual((await client.post("/api/files/restore", json={"undo": text_only["undo"]})).status_code, 200)
+                    self.assertEqual((await files())[2]["summary"], "요약한 글")
+                    self.assertEqual((await client.post("/api/files/restore", json={"undo": text_only["undo"]})).status_code, 410)
+                    audio_only = (await remove(id=one["id"], audio=True)).json()
+                    self.assertFalse(audio_only["removed"])
+                    self.assertEqual(((await files())[2]["stored_name"], (await files())[2]["transcript"]), ("", "받아쓴 글"))
+                    self.assertTrue(stored.exists())   # kept while the undo is offered
+                    self.assertEqual((await client.get("/api/state")).json()["runtime"]["leftover"]["count"], 0)
+                    self.assertEqual((await client.post(f"/api/transcribe?file_id={one['id']}")).status_code, 400)
+                    self.assertEqual((await client.post("/api/files/purge", json={"undo": audio_only["undo"]})).status_code, 200)
+                    self.assertFalse(stored.exists())
+                    self.assertEqual((await client.post("/api/files/restore", json={"undo": audio_only["undo"]})).status_code, 410)
+                    # The text that is left goes too: nothing remains, so the record leaves the list.
+                    self.assertTrue((await remove(id=one["id"], summary=True, audio=True)).json()["removed"])
+                    self.assertEqual(len(await files()), 2)
+                    two = await upload("둘 다 지울 기록.wav")
+                    stored = s.VAULT.encrypted(root / "Recordings" / two["stored_name"])
+                    both = (await remove(id=two["id"], summary=True, audio=True)).json()
+                    self.assertTrue(both["removed"])
+                    self.assertEqual(len(await files()), 2)
+                    self.assertEqual((await client.post("/api/files/restore", json={"undo": both["undo"]})).status_code, 200)
+                    self.assertEqual((await files())[2]["id"], two["id"])
+                    # Left alone, a deletion becomes final after the undo window.
+                    await remove(id=two["id"], audio=True)
+                    for entry in s.STATE["trash"]:
+                        entry["removed"] -= s.UNDO_SECONDS + 1
+                    await asyncio.sleep(1.3)
+                    self.assertFalse(stored.exists())
+                    self.assertEqual(s.STATE["trash"], [])
+                    self.assertEqual(len(await files()), 2)
+                    # Recordings an older version left behind: back on the list, or deleted for good.
+                    s.VAULT.write_bytes(root / "Recordings" / "orphan.wav", audio)
+                    self.assertEqual((await client.get("/api/state")).json()["runtime"]["leftover"], {"count": 1, "size": (root / "Recordings/orphan.wav.enc").stat().st_size})
+                    self.assertEqual((await client.post("/api/files/leftover", json={"action": "restore"})).json()["count"], 1)
+                    back = (await files())[2]
+                    self.assertEqual((back["stored_name"], back["duration"], back["status"]), ("orphan.wav", 1, "Pending"))
+                    self.assertTrue(back["name"].endswith(" 녹음.wav"))
+                    self.assertEqual((await client.get("/api/state")).json()["runtime"]["leftover"]["count"], 0)
+                    gone = (await remove(id=back["id"], audio=True)).json()
+                    await client.post("/api/files/purge", json={"undo": gone["undo"]})
+                    s.VAULT.write_bytes(root / "Recordings" / "orphan2.wav", audio)
+                    self.assertEqual((await client.post("/api/files/leftover", json={"action": "delete"})).json()["count"], 1)
+                    self.assertFalse((root / "Recordings/orphan2.wav.enc").exists())
+                    self.assertEqual(len(await files()), 2)
                     self.assertEqual((await client.patch("/api/text", json={"summary": SECRET})).status_code, 200)
                     exported = (await client.post("/api/export", json={"kind": "summary", "format": "md"})).json()
                     self.assertTrue((root / "Results" / (exported["filename"] + ".enc")).exists())

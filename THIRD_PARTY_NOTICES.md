@@ -9,6 +9,7 @@ The following separately installed open source components retain their own licen
 | faster-whisper | MIT | https://github.com/SYSTRAN/faster-whisper/blob/master/LICENSE |
 | CTranslate2 | MIT | https://github.com/OpenNMT/CTranslate2/blob/master/LICENSE |
 | OpenAI Whisper model weights | MIT | https://github.com/openai/whisper/blob/main/LICENSE |
+| faster-whisper-large-v3-turbo (CTranslate2 conversion of the Whisper large-v3-turbo weights) | MIT | https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo |
 | FastAPI | MIT | https://github.com/fastapi/fastapi/blob/master/LICENSE |
 | Starlette | BSD-3-Clause | https://github.com/encode/starlette/blob/main/LICENSE.md |
 | Uvicorn | BSD-3-Clause | https://github.com/encode/uvicorn/blob/main/LICENSE.md |
