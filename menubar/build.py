@@ -31,7 +31,8 @@ if (ROOT / "data" / "processes.json").exists():
     raise RuntimeError("소스 폴더의 서버를 먼저 중지한 뒤 다시 설치하세요.")
 for name in ("bootstrap.py", "launcher.py", "server.py", "vault.py", "native_auth.py", "requirements.txt", "requirements-lock.txt"):
     shutil.copy2(ROOT / name, RUNTIME / name)
-shutil.copytree(ROOT / "static", RUNTIME / "static", dirs_exist_ok=True)
+shutil.rmtree(RUNTIME / "static", ignore_errors=True)   # app files only; drops files removed from the source
+shutil.copytree(ROOT / "static", RUNTIME / "static")
 if not (RUNTIME / ".venv").exists() and (ROOT / ".venv").exists():
     shutil.copytree(ROOT / ".venv", RUNTIME / ".venv", symlinks=True)
 if not (RUNTIME / "data").exists():
@@ -46,7 +47,7 @@ info = {
     "CFBundleName": "Local LLM Encoder", "CFBundleDisplayName": "Local LLM Encoder",
     "CFBundleIdentifier": "net.realmi.azimuth-scribe.local",
     "CFBundleExecutable": "AzimuthScribe", "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.3.1", "CFBundleVersion": "6",
+    "CFBundleShortVersionString": "1.4.0", "CFBundleVersion": "7",
     "CFBundleURLTypes": [{"CFBundleURLName": "Local LLM Encoder", "CFBundleURLSchemes": ["localllmencoder"]}],
     "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True,
     "NSMicrophoneUsageDescription": "메뉴 막대에서 시작한 녹음을 받아쓰려면 마이크 접근이 필요합니다.",

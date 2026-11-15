@@ -29,7 +29,7 @@ def main():
     receipt = ROOT / ".local-install.json"
     installed = Path(json.loads(receipt.read_text())["runtime_path"]) if receipt.exists() else ROOT
     models = installed / "data" / "models"
-    assert (models / "faster-whisper-small" / "model.bin").is_file(), "Prepare Whisper small first."
+    assert (models / "faster-whisper-large-v3-turbo" / "model.bin").is_file(), "Prepare Whisper large-v3-turbo first."
     with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as response:
         available = json.load(response)
     assert any(item["name"] == "qwen3:4b-instruct" for item in available["models"]), "Prepare Qwen first."

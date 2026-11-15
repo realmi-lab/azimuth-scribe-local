@@ -86,15 +86,12 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.record = { [weak self] in self?.recordAction() }
         panel.start = { [weak self] in self?.startServer(nil) }
         panel.restart = { [weak self] in self?.restartServer(nil) }
-        panel.cancel = { [weak self] in self?.cancelWork(nil) }
         panel.openFolder = { [weak self] path in self?.openFolder(path) }
         panel.quit = { [weak self] in self?.quitEverything(nil) }
-        panel.lockVault = { [weak self] in self?.lockVault() }
         workspace.onVaultMessage = { [weak self] in self?.handleVaultMessage($0) }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenLocked), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenLocked), name: NSWorkspace.willSleepNotification, object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenLocked), name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
-        panel.help = { [weak self] in self?.workspace.web.evaluateJavaScript("document.getElementById('help-button').click()") }
         window = makeWindow()
         let mainMenu = NSMenu()
         let appMenu = NSMenuItem()
@@ -183,7 +180,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 entry.isHidden = entry.title.isEmpty
                 entry.isEnabled = false
             case 10: entry.isEnabled = operation == nil
-            case 11: entry.isEnabled = operation == nil && connected
+            case 11: entry.isEnabled = operation == nil && connected && !panel.vaultLocked
             case 12: entry.isEnabled = connected && !panel.vaultLocked
             case 20:
                 entry.title = connected ? "서버 중지" : "서버 시작"
@@ -201,8 +198,6 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.connected = connected
         panel.vaultLocked = vaultStatus?.locked ?? true
         panel.working = working
-        panel.job = state?.runtime.job?.message ?? ""
-        panel.failed = state?.runtime.job?.status == "error"
         for menu in menus { update(menu) }
         statusItem?.button?.toolTip = operation ?? (connected ? "Local LLM Encoder · 실행 중" : "Local LLM Encoder · 서버 중지됨")
         statusItem?.button?.image = NSImage(systemSymbolName: connected ? "mic.circle.fill" : "mic.circle", accessibilityDescription: "Local LLM Encoder")
@@ -261,18 +256,6 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         window.center()
-    }
-
-    private func submit(_ path: String, _ body: [String: Any]) {
-        guard !panel.busy, !working else { return }
-        panel.busy = true
-        panel.notice = ""
-        request(path, body: body) { [weak self] _, error in
-            guard let self else { return }
-            self.panel.notice = error?.localizedDescription ?? ""
-            self.panel.busy = false
-            self.refresh()
-        }
     }
 
     private func recordAction() {
@@ -339,7 +322,10 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.notice = "녹음 저장 중…"
         let file = pending
         DispatchQueue.global().async {
-            let stamp = ISO8601DateFormatter().string(from: Date())
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd HH.mm"
+            let stamp = formatter.string(from: Date()) + " 녹음"
             do {
                 guard let clip = try self.postFiles([file.path + ";filename=" + stamp + ".m4a"], recording: true).first else {
                     throw NSError(domain:"Scribe", code:3, userInfo:[NSLocalizedDescriptionKey:"녹음을 보관했습니다. 다시 저장해 주세요."])
@@ -349,7 +335,8 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.panel.busy = false
                     self.panel.pending = false
                     self.panel.notice = ""
-                    self.submit("api/transcribe?file_id=" + clip.id, [:])
+                    // Show the new recording; its page has the one next step, "요약하기".
+                    self.workspace.web.callAsyncJavaScript("await window.openRecord(id)", arguments: ["id": clip.id], in: nil, in: .page) { _ in }
                     self.refresh()
                 }
             } catch { DispatchQueue.main.async {
@@ -482,13 +469,12 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openProgram(_ sender: Any?) {
-        panel.screen = .workspace
         showPanel()
     }
 
     @objc private func openSettings(_ sender: Any?) {
-        panel.screen = .settings
         showPanel()
+        workspace.web.evaluateJavaScript("document.querySelector('[data-action=\"settings\"]')?.click()")
     }
 
     @objc private func cancelWork(_ sender: Any?) {
@@ -564,7 +550,7 @@ final class ScribeController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         vaultGeneration += 1
         vaultSession = nil
         state = nil
-        panel.job = ""; panel.notice = ""; panel.failed = false
+        panel.notice = ""
         vaultStatus = VaultStatus(initialized: vaultStatus?.initialized ?? true, locked: true, locking: false, id: vaultStatus?.id, authMode: vaultStatus?.authMode)
         panel.vaultLocked = true
         workspace.clearPrivate()
